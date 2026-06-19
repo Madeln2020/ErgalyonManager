@@ -1,0 +1,144 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<InvoicesDoc xmlns="http://www.aade.gr/myDATA/invoice/v1.0"
+             xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+             xsi:schemaLocation="http://www.aade.gr/myDATA/invoice/v1.0">
+
+  <invoice>
+    <!-- Header: Στοιχεία Τιμολογίου -->
+    <invoiceHeader>
+      <series>1</series>
+      <aa>1234</aa>
+      <issueDate>2026-06-15</issueDate>
+      <invoiceTypeCode>1.1</invoiceTypeCode>
+      <currency>EUR</currency>
+    </invoiceHeader>
+
+    <!-- Issuer: Ποιμενίδης Α.Ε. -->
+    <issuer>
+      <vatNumber>094012345</vatNumber>
+      <country>GR</country>
+      <branch>0</branch>
+    </issuer>
+
+    <!-- Counterpart: Εργαλύων -->
+    <counterpart>
+      <vatNumber>803034270</vatNumber>
+      <country>GR</country>
+      <branch>0</branch>
+    </counterpart>
+
+    <!-- Γραμμές Τιμολογίου -->
+    <invoiceDetails>
+      <lineNumber>1</lineNumber>
+      <itemCode>03-12345</itemCode>
+      <itemDescr>ΣΕΓΑ ΣΠΑΘΟΥ BOSCH 800W 26MM</itemDescr>
+      <quantity>2.000</quantity>
+      <netValue>85.50</netValue>
+      <vatCategory>1</vatCategory>
+      <vatAmount>19.67</vatAmount>
+    </invoiceDetails>
+
+    <invoiceDetails>
+      <lineNumber>2</lineNumber>
+      <itemCode>03-12346</itemCode>
+      <itemDescr>ΛΑΜΑ ΣΕΓΑΣ BOSCH 240MM (5ΤΕΜ)</itemDescr>
+      <quantity>5.000</quantity>
+      <netValue>32.50</netValue>
+      <vatCategory>1</vatCategory>
+      <vatAmount>7.48</vatAmount>
+    </invoiceDetails>
+
+    <invoiceDetails>
+      <lineNumber>3</lineNumber>
+      <itemCode>03-12347</itemCode>
+      <itemDescr>ΔΡΑΠΑΝΟ 18V MAKITA 2ΤΑΧΥΤΗΤΩΝ</itemDescr>
+      <quantity>1.000</quantity>
+      <netValue>142.00</netValue>
+      <vatCategory>1</vatCategory>
+      <vatAmount>32.66</vatAmount>
+    </invoiceDetails>
+
+    <invoiceDetails>
+      <lineNumber>4</lineNumber>
+      <itemCode>03-12348</itemCode>
+      <itemDescr>ΓΩΝΙΑΚΟΣ ΤΡΟΧΟΣ 115MM BOSCH GWS 7-115</itemDescr>
+      <quantity>3.000</quantity>
+      <netValue>89.90</netValue>
+      <vatCategory>1</vatCategory>
+      <vatAmount>20.68</vatAmount>
+    </invoiceDetails>
+
+    <invoiceDetails>
+      <lineNumber>5</lineNumber>
+      <itemCode>03-12349</itemCode>
+      <itemDescr>ΚΑΤΣΑΒΙΔΙ 12V BOSCH 2 ΤΑΧΥΤΗΤΕΣ</itemDescr>
+      <quantity>2.000</quantity>
+      <netValue>118.00</netValue>
+      <vatCategory>1</vatCategory>
+      <vatAmount>27.14</vatAmount>
+    </invoiceDetails>
+
+    <!-- Σύνολα -->
+    <invoiceSummary>
+      <totalNetValue>467.90</totalNetValue>
+      <totalVatAmount>107.63</totalVatAmount>
+      <totalWithheldAmount>0.00</totalWithheldAmount>
+      <totalFeesAmount>0.00</totalFeesAmount>
+      <totalStampDutyAmount>0.00</totalStampDutyAmount>
+      <totalDeductionsAmount>0.00</totalDeductionsAmount>
+      <totalGrossValue>575.53</totalGrossValue>
+    </invoiceSummary>
+  </invoice>
+
+  <invoice>
+    <invoiceHeader>
+      <series>1</series>
+      <aa>1235</aa>
+      <issueDate>2026-06-16</issueDate>
+      <invoiceTypeCode>1.1</invoiceTypeCode>
+      <currency>EUR</currency>
+    </invoiceHeader>
+
+    <issuer>
+      <vatNumber>094012345</vatNumber>
+      <country>GR</country>
+      <branch>0</branch>
+    </issuer>
+
+    <counterpart>
+      <vatNumber>803034270</vatNumber>
+      <country>GR</country>
+      <branch>0</branch>
+    </counterpart>
+
+    <invoiceDetails>
+      <lineNumber>1</lineNumber>
+      <itemCode>03-12400</itemCode>
+      <itemDescr>ΤΡΥΠΑΝΙ ΜΕΤΑΛΛΟΥ 10MM DEWALT</itemDescr>
+      <quantity>10.000</quantity>
+      <netValue>45.00</netValue>
+      <vatCategory>1</vatCategory>
+      <vatAmount>10.35</vatAmount>
+    </invoiceDetails>
+
+    <invoiceDetails>
+      <lineNumber>2</lineNumber>
+      <itemCode>03-12401</itemCode>
+      <itemDescr>ΣΕΤ ΚΟΥΤΙ ΤΡΥΠΑΝΙΩΝ 50ΤΕΜ DEWALT</itemDescr>
+      <quantity>3.000</quantity>
+      <netValue>72.00</netValue>
+      <vatCategory>1</vatCategory>
+      <vatAmount>16.56</vatAmount>
+    </invoiceDetails>
+
+    <invoiceSummary>
+      <totalNetValue>117.00</totalNetValue>
+      <totalVatAmount>26.91</totalVatAmount>
+      <totalWithheldAmount>0.00</totalWithheldAmount>
+      <totalFeesAmount>0.00</totalFeesAmount>
+      <totalStampDutyAmount>0.00</totalStampDutyAmount>
+      <totalDeductionsAmount>0.00</totalDeductionsAmount>
+      <totalGrossValue>143.91</totalGrossValue>
+    </invoiceSummary>
+  </invoice>
+</InvoicesDoc>

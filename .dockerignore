@@ -1,0 +1,17 @@
+# ═══════════════════════════════════════════════════════════════════
+# EDM v2 — .dockerignore
+# ═══════════════════════════════════════════════════════════════════
+.git
+.gitignore
+*.md
+docs/
+__pycache__/
+*.pyc
+.env
+.venv/
+venv/
+node_modules/
+.next/
+backups/
+load-tests/
+.hermes/
