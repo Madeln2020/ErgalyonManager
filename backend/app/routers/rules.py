@@ -1,10 +1,12 @@
 # EDM v2 — Rule Tester Router (§8)
 # Provides a dry-run endpoint to test rules against sample input.
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from app.services.rule_engine import RuleEngine, NormalizedItem
+from app.auth import require_role, Role
+from app.models import User
 
 router = APIRouter(prefix="/api/v1/rules", tags=["rules"])
 
@@ -24,7 +26,10 @@ class RuleTestResponse(BaseModel):
 
 
 @router.post("/test", response_model=RuleTestResponse)
-async def test_rules(req: RuleTestRequest):
+async def test_rules(
+    req: RuleTestRequest,
+    current_user: User = Depends(require_role(Role.VIEWER)),
+):
     """Dry-run: apply rules_json to sample input and return normalized result."""
     from decimal import Decimal
 

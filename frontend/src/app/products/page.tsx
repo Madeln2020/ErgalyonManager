@@ -1,7 +1,10 @@
+// frontend/src/app/products/page.tsx
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import DashboardLayout from '../DashboardLayout'
+import { apiFetch } from '@/lib/api'
+import { useAuth } from '@/lib/auth'
 
 interface Product {
   id: string
@@ -26,29 +29,71 @@ export default function ProductsPage() {
   const [suppliers, setSuppliers] = useState<Supplier[]>([])
   const [page, setPage] = useState(0)
   const limit = 25
+  const [enriching, setEnriching] = useState<Set<string>>(new Set()) // Track which products are being enriched
 
-  useEffect(() => {
-    fetch('/api/v1/suppliers')
-      .then(r => r.json())
-      .then(data => setSuppliers(Array.isArray(data) ? data : []))
-      .catch(() => {})
+  const { token, user } = useAuth() // Get token and user info
+
+  const fetchSuppliers = useCallback(async () => {
+    try {
+      const data = await apiFetch<Supplier[]>('/suppliers')
+      setSuppliers(data)
+    } catch (err) {
+      console.error('Failed to fetch suppliers:', err)
+    }
   }, [])
 
-  useEffect(() => {
+  const fetchProducts = useCallback(async () => {
     setLoading(true)
-    const params = new URLSearchParams({ limit: String(limit), offset: String(page * limit) })
-    if (search) params.set('search', search)
-    if (supplierFilter) params.set('supplier_id', supplierFilter)
-
-    fetch(`/api/v1/products?${params.toString()}`)
-      .then(r => r.json())
-      .then(data => {
-        setProducts(data.items || [])
-        setTotal(data.total || 0)
+    try {
+      const params = new URLSearchParams({
+        limit: String(limit),
+        offset: String(page * limit),
       })
-      .catch(() => {})
-      .finally(() => setLoading(false))
+      if (search) params.set('search', search)
+      if (supplierFilter) params.set('supplier_id', supplierFilter)
+
+      const data = await apiFetch<{ items: Product[]; total: number }>(
+        `/api/v1/products?${params.toString()}`
+      )
+      setProducts(data.items || [])
+      setTotal(data.total || 0)
+    } catch (err) {
+      console.error('Failed to fetch products:', err)
+      setProducts([])
+      setTotal(0)
+    } finally {
+      setLoading(false)
+    }
   }, [search, supplierFilter, page])
+
+  useEffect(() => {
+    fetchSuppliers()
+    fetchProducts()
+  }, [fetchSuppliers, fetchProducts])
+
+  const handleEnrich = async (productId: string) => {
+    if (!token) {
+      alert('You must be logged in to enrich products.')
+      return
+    }
+    setEnriching(prev => new Set(prev).add(productId))
+    try {
+      await apiFetch<{ job_id: string; status: string }>(
+        `/api/v1/products/${productId}/enrich`,
+        { method: 'POST' }
+      )
+      alert('Enrichment started! You can check the status later.')
+    } catch (err) {
+      console.error('Failed to start enrichment:', err)
+      alert('Failed to start enrichment: ' + (err instanceof Error ? err.message : String(err)))
+    } finally {
+      setEnriching(prev => {
+        const newSet = new Set(prev)
+        newSet.delete(productId)
+        return newSet
+      })
+    }
+  }
 
   return (
     <DashboardLayout>
@@ -88,13 +133,14 @@ export default function ProductsPage() {
                 <th className="text-left px-4 py-3 font-medium text-gray-600">Κωδ. Κατασκευαστή</th>
                 <th className="text-right px-4 py-3 font-medium text-gray-600">Τιμή</th>
                 <th className="text-center px-4 py-3 font-medium text-gray-600">Σημαία</th>
+                <th className="text-center px-4 py-3 font-medium text-gray-600">Ενίσχυση</th>
               </tr>
             </thead>
             <tbody>
               {loading ? (
-                <tr><td colSpan={6} className="text-center py-8 text-gray-400">Φόρτωση...</td></tr>
+                <tr><td colSpan={7} className="text-center py-8 text-gray-400">Φόρτωση...</td></tr>
               ) : products.length === 0 ? (
-                <tr><td colSpan={6} className="text-center py-8 text-gray-400">Δεν βρέθηκαν προϊόντα</td></tr>
+                <tr><td colSpan={7} className="text-center py-8 text-gray-400">Δεν βρέθηκαν προϊόντα</td></tr>
               ) : products.map((p) => (
                 <tr key={p.id} className="border-b border-gray-50 hover:bg-gray-50 transition-colors">
                   <td className="px-4 py-3 font-mono text-blue-600 text-xs">{p.ergalyon_code}</td>
@@ -109,6 +155,18 @@ export default function ProductsPage() {
                       <span className="text-green-500 text-xs">✅</span>
                     ) : (
                       <span className="text-gray-300 text-xs">—</span>
+                    )}
+                  </td>
+                  <td className="px-4 py-3 text-center">
+                    {enriching.has(p.id) ? (
+                      <span className="text-yellow-500 animate-pulse">⏳</span>
+                    ) : (
+                      <button
+                        onClick={() => handleEnrich(p.id)}
+                        className="text-xs px-2 py-1 bg-blue-500 text-white rounded hover:bg-blue-600"
+                      >
+                        ⚡
+                      </button>
                     )}
                   </td>
                 </tr>

@@ -1,14 +1,16 @@
-# EDM v2 — Supplier Router (§6.1)  — Phase 4: Redis caching + Audit trail
+# EDM v2 — Supplier Router (§6.1) — Multi-tenant with RBAC
 
 from uuid import UUID
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.models import Supplier
-from app.schemas import SupplierCreate, SupplierRead, SupplierUpdate
+from app.models import Supplier, User
+from app.schemas import SupplierCreate, SupplierRead, SupplierUpdate, SupplierListRead
+from app.auth import get_current_user, require_role, Role
 from app.services.cache import make_key, get_cached, set_cached, invalidate
 from app.services.audit_service import log_event
 
@@ -18,8 +20,14 @@ _CACHE_PREFIX = "suppliers"
 
 
 @router.post("", response_model=SupplierRead, status_code=status.HTTP_201_CREATED)
-async def create_supplier(data: SupplierCreate, db: AsyncSession = Depends(get_db)):
+async def create_supplier(
+    data: SupplierCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role(Role.USER)),
+):
+    """Create a new supplier. Requires USER role or above."""
     supplier = Supplier(**data.model_dump())
+    supplier.organization_id = current_user.organization_id
     db.add(supplier)
     await db.flush()
     await db.refresh(supplier)
@@ -30,53 +38,55 @@ async def create_supplier(data: SupplierCreate, db: AsyncSession = Depends(get_d
         entity_id=supplier.id,
         event_name="created",
         payload=data.model_dump(),
+        user_id=current_user.id,
         session=db,
     )
 
-    # Invalidate list cache when a new supplier is added
     invalidate(_CACHE_PREFIX, "list")
     return supplier
 
 
 @router.get("", response_model=list[SupplierRead])
-async def list_suppliers(db: AsyncSession = Depends(get_db)):
-    """List active suppliers with Redis cache (TTL 2 min)."""
-    cache_key = make_key(_CACHE_PREFIX, "list")
+async def list_suppliers(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role(Role.VIEWER)),
+):
+    """List suppliers scoped to the user's organization. Requires VIEWER+."""
+    cache_key = make_key(_CACHE_PREFIX, "list", str(current_user.organization_id))
     cached = get_cached(cache_key)
     if cached is not None:
         return cached
 
-    result = await db.execute(select(Supplier).where(Supplier.is_active == True))
+    result = await db.execute(
+        select(Supplier).where(
+            Supplier.deleted_at.is_(None),
+            Supplier.organization_id == current_user.organization_id,
+        )
+    )
     suppliers = result.scalars().all()
-    data = [
-        {
-            "id": str(s.id),
-            "name": s.name,
-            "vat_number": s.vat_number,
-            "country": s.country,
-            "contact_email": s.contact_email,
-            "contact_phone": s.contact_phone,
-            "rules_json": s.rules_json,
-            "parsing_profile": s.parsing_profile,
-            "is_active": s.is_active,
-            "created_at": s.created_at.isoformat() if s.created_at else None,
-            "updated_at": s.updated_at.isoformat() if s.updated_at else None,
-        }
-        for s in suppliers
-    ]
-    set_cached(cache_key, data)
-    return data
+    set_cached(cache_key, suppliers)
+    return suppliers
 
 
 @router.get("/{supplier_id}", response_model=SupplierRead)
-async def get_supplier(supplier_id: UUID, db: AsyncSession = Depends(get_db)):
-    """Get single supplier with Redis cache."""
+async def get_supplier(
+    supplier_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role(Role.VIEWER)),
+):
+    """Get single supplier. Requires VIEWER+."""
     cache_key = make_key(_CACHE_PREFIX, "detail", str(supplier_id))
     cached = get_cached(cache_key)
     if cached is not None:
         return cached
 
-    result = await db.execute(select(Supplier).where(Supplier.id == supplier_id))
+    result = await db.execute(
+        select(Supplier).where(
+            Supplier.id == supplier_id,
+            Supplier.deleted_at.is_(None),
+            Supplier.organization_id == current_user.organization_id,
+        )
+    )
     supplier = result.scalar_one_or_none()
     if not supplier:
         raise HTTPException(status_code=404, detail="Supplier not found")
@@ -85,14 +95,23 @@ async def get_supplier(supplier_id: UUID, db: AsyncSession = Depends(get_db)):
 
 @router.put("/{supplier_id}", response_model=SupplierRead)
 async def update_supplier(
-    supplier_id: UUID, data: SupplierUpdate, db: AsyncSession = Depends(get_db)
+    supplier_id: UUID,
+    data: SupplierUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role(Role.ADMIN)),
 ):
-    result = await db.execute(select(Supplier).where(Supplier.id == supplier_id))
+    """Update supplier. Requires ADMIN or OWNER."""
+    result = await db.execute(
+        select(Supplier).where(
+            Supplier.id == supplier_id,
+            Supplier.deleted_at.is_(None),
+            Supplier.organization_id == current_user.organization_id,
+        )
+    )
     supplier = result.scalar_one_or_none()
     if not supplier:
         raise HTTPException(status_code=404, detail="Supplier not found")
 
-    # Snapshot old values for audit
     old_values = {field: getattr(supplier, field) for field in data.model_dump(exclude_unset=True)}
 
     for field, value in data.model_dump(exclude_unset=True).items():
@@ -106,26 +125,40 @@ async def update_supplier(
         entity_type="supplier",
         entity_id=supplier.id,
         event_name="updated",
-        payload={"old": {k: str(v) if v else None for k, v in old_values.items()},
-                 "new": {k: str(v) if v else None for k, v in data.model_dump(exclude_unset=True).items()}},
+        payload={
+            "old": {k: str(v) if v else None for k, v in old_values.items()},
+            "new": {k: str(v) if v else None for k, v in data.model_dump(exclude_unset=True).items()},
+        },
+        user_id=current_user.id,
         session=db,
     )
 
-    # Invalidate both list and detail cache
     invalidate(_CACHE_PREFIX, "list")
     invalidate(_CACHE_PREFIX, "detail", str(supplier_id))
     return supplier
 
 
 @router.delete("/{supplier_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_supplier(supplier_id: UUID, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Supplier).where(Supplier.id == supplier_id))
+async def delete_supplier(
+    supplier_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role(Role.ADMIN)),
+):
+    """Soft-delete supplier. Requires ADMIN or OWNER."""
+    result = await db.execute(
+        select(Supplier).where(
+            Supplier.id == supplier_id,
+            Supplier.deleted_at.is_(None),
+            Supplier.organization_id == current_user.organization_id,
+        )
+    )
     supplier = result.scalar_one_or_none()
     if not supplier:
         raise HTTPException(status_code=404, detail="Supplier not found")
 
-    # Soft delete: set inactive
-    supplier.is_active = False
+    # Soft delete
+    supplier.deleted_at = datetime.now(timezone.utc)
+    supplier.status = "INACTIVE"
     await db.flush()
 
     # Audit trail
@@ -133,10 +166,10 @@ async def delete_supplier(supplier_id: UUID, db: AsyncSession = Depends(get_db))
         entity_type="supplier",
         entity_id=supplier_id,
         event_name="deleted",
-        payload={"name": supplier.name, "vat_number": supplier.vat_number},
+        payload={"name": supplier.name, "afm": supplier.afm},
+        user_id=current_user.id,
         session=db,
     )
 
-    # Invalidate caches
     invalidate(_CACHE_PREFIX, "list")
     invalidate(_CACHE_PREFIX, "detail", str(supplier_id))

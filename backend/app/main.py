@@ -17,7 +17,7 @@ from app.services.input_sanitizer import add_input_sanitization_middleware
 from app.services.secrets_validator import validate_and_exit
 
 from sqlalchemy import text
-from app.routers import suppliers, products, invoices, review_queue, export, rules, catalogs, rag, scrape, supplier_agreements, health
+from app.routers import suppliers, products, invoices, review_queue, export, rules, catalogs, rag, scrape, supplier_agreements, health, auth
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -129,6 +129,7 @@ app.include_router(supplier_agreements.router)
 
 app.include_router(rag.router)
 app.include_router(health.router)
+app.include_router(auth.router)
 
 
 async def global_exception_handler(request: Request, exc: Exception):

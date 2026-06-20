@@ -45,38 +45,125 @@ class SoftDeleteMixin:
 # ──────────────────────────────────────────────
 # 5.2.1 suppliers
 # ──────────────────────────────────────────────
+
+# ──────────────────────────────────────────────
+# 5.2.0 organizations
+# ──────────────────────────────────────────────
+class Organization(Base, TimestampMixin):
+    __tablename__ = "organizations"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    name: Mapped[str] = mapped_column(VARCHAR(255), nullable=False)
+    aade_afm: Mapped[Optional[str]] = mapped_column(VARCHAR(20), unique=True)
+    address: Mapped[Optional[Text]] = mapped_column(Text)
+    settings: Mapped[Optional[dict]] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    # relationships
+    users = relationship("User", back_populates="organization")
+    suppliers = relationship("Supplier", back_populates="organization")
+    products = relationship("Product", back_populates="organization")
+    invoices = relationship("Invoice", back_populates="organization")
+
+# ──────────────────────────────────────────────
+# 5.2.0 users
+# ──────────────────────────────────────────────
+class User(Base, TimestampMixin):
+    __tablename__ = "users"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False
+    )
+    email: Mapped[str] = mapped_column(VARCHAR(255), nullable=False, unique=True)
+    password_hash: Mapped[str] = mapped_column(VARCHAR(255), nullable=False)
+    role: Mapped[str] = mapped_column(VARCHAR(20))  # Should be restricted to OWNER, ADMIN, USER, VIEWER via check constraint or enum
+    display_name: Mapped[Optional[str]] = mapped_column(VARCHAR(255))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_login: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+    # relationships
+    organization = relationship("Organization", back_populates="users")
 class Supplier(Base, TimestampMixin):
     __tablename__ = "suppliers"
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
     )
-    name: Mapped[str] = mapped_column(VARCHAR(255), nullable=False)
-    vat_number: Mapped[Optional[str]] = mapped_column(VARCHAR(20), unique=True)
-    country: Mapped[str] = mapped_column(VARCHAR(2), default="GR")
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(VARCHAR(255), nullable=False)  # Display Name
+    legal_name: Mapped[Optional[str]] = mapped_column(VARCHAR(255))
+    afm: Mapped[Optional[str]] = mapped_column(VARCHAR(20), unique=True)  # AADE Tax ID (ΑΦΜ)
+    aade_data: Mapped[Optional[dict]] = mapped_column(JSONB)  # cached JSON: DOY, address, registration status, activity codes
+    website: Mapped[Optional[str]] = mapped_column(VARCHAR(255))
     contact_email: Mapped[Optional[str]] = mapped_column(VARCHAR(255))
     contact_phone: Mapped[Optional[str]] = mapped_column(VARCHAR(50))
-    rules_json: Mapped[dict] = mapped_column(JSONB, default=dict)
-    default_category_k1_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("categories.id")
+    contact_persons: Mapped[Optional[list]] = mapped_column(JSONB)  # list of dicts: {name, role, phone, email}
+    payment_terms: Mapped[Optional[str]] = mapped_column(VARCHAR(100))
+    notes: Mapped[Optional[Text]] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(
+        VARCHAR(20),
+        CheckConstraint("status IN ('ACTIVE','INACTIVE','BLACKLISTED')"),
+        default='ACTIVE'
     )
-    parsing_profile: Mapped[Optional[str]] = mapped_column(VARCHAR(50))
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))  # Soft delete
+    code_normalization_rules: Mapped[Optional[dict]] = mapped_column(JSONB)  # JSON config for regex transformations
+    default_parser_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("parser_configs.id")
     )
+    # Timestamps from TimestampMixin: created_at, updated_at
 
     # relationships
     invoices = relationship("Invoice", back_populates="supplier")
     rules = relationship("SupplierRule", back_populates="supplier")
     agreements = relationship("SupplierAgreement", back_populates="supplier")
+    contacts = relationship("SupplierContact", back_populates="supplier", cascade="all, delete-orphan")
+    organization = relationship("Organization")
+
+
+# ──────────────────────────────────────────────
+# 4.5 supplier_contacts
+# ──────────────────────────────────────────────
+class SupplierContact(Base, TimestampMixin):
+    __tablename__ = "supplier_contacts"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False
+    )
+    supplier_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("suppliers.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[Optional[str]] = mapped_column(VARCHAR(255))
+    role: Mapped[Optional[str]] = mapped_column(VARCHAR(255))
+    phone: Mapped[Optional[str]] = mapped_column(VARCHAR(50))
+    email: Mapped[Optional[str]] = mapped_column(VARCHAR(255))
+
+    # relationships
+    supplier = relationship("Supplier", back_populates="contacts")
+    organization = relationship("Organization")
 
 
 # ──────────────────────────────────────────────
 # 5.2.2 categories
+
 # ──────────────────────────────────────────────
 class Category(Base, TimestampMixin):
     __tablename__ = "categories"
+    organization_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False)
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
@@ -107,6 +194,9 @@ class Product(Base, TimestampMixin, SoftDeleteMixin):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
     )
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False
+    )
     ergalyon_code: Mapped[str] = mapped_column(VARCHAR(50), unique=True, nullable=False)
     supplier_code: Mapped[str] = mapped_column(VARCHAR(100), nullable=False)
     manufacturer_code: Mapped[Optional[str]] = mapped_column(VARCHAR(100))
@@ -118,6 +208,8 @@ class Product(Base, TimestampMixin, SoftDeleteMixin):
     description: Mapped[str] = mapped_column(Text, nullable=False)
     description_normalized: Mapped[str] = mapped_column(Text, nullable=False)
     specs_json: Mapped[dict] = mapped_column(JSONB, default=dict)
+    internal_sku: Mapped[Optional[str]] = mapped_column(VARCHAR(100))
+    pylon_code: Mapped[Optional[str]] = mapped_column(VARCHAR(255))  # ONLY for export
     category_k1_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True), ForeignKey("categories.id")
     )
@@ -157,10 +249,8 @@ class Product(Base, TimestampMixin, SoftDeleteMixin):
     source_data = relationship("ProductSourceData", back_populates="product")
     price_history = relationship("PriceHistory", back_populates="product")
     review_items = relationship("ReviewQueueItem", back_populates="product")
-    invoice_items = relationship("InvoiceItem", back_populates="product")
-
-
-# ──────────────────────────────────────────────
+    invoice_items = relationship("InvoiceItem", back_populates="product", foreign_keys="InvoiceItem.product_id")
+    organization = relationship("Organization")
 # 5.2.4 invoices
 # ──────────────────────────────────────────────
 class Invoice(Base, TimestampMixin):
@@ -168,6 +258,9 @@ class Invoice(Base, TimestampMixin):
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False
     )
     supplier_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("suppliers.id", ondelete="RESTRICT"), nullable=False
@@ -198,6 +291,7 @@ class Invoice(Base, TimestampMixin):
     currency: Mapped[str] = mapped_column(VARCHAR(3), default="EUR")
     error_message: Mapped[Optional[str]] = mapped_column(Text)
     processed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    created_by: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
 
     __table_args__ = (
         Index("idx_invoices_supplier_status", "supplier_id", "status"),
@@ -206,9 +300,7 @@ class Invoice(Base, TimestampMixin):
     # relationships
     supplier = relationship("Supplier", back_populates="invoices")
     items = relationship("InvoiceItem", back_populates="invoice", cascade="all, delete-orphan")
-
-
-# ──────────────────────────────────────────────
+    organization = relationship("Organization")
 # 5.2.5 invoice_items
 # ──────────────────────────────────────────────
 class InvoiceItem(Base, TimestampMixin):
@@ -217,11 +309,14 @@ class InvoiceItem(Base, TimestampMixin):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
     )
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False
+    )
     invoice_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("invoices.id", ondelete="CASCADE"), nullable=False
     )
     product_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("products.id", ondelete="SET NULL")
+        UUID(as_uuid=True), ForeignKey("products.id", ondelete="SET NULL"), nullable=False
     )
     line_number: Mapped[Optional[int]] = mapped_column(Integer)
     raw_supplier_code: Mapped[Optional[str]] = mapped_column(VARCHAR(100))
@@ -231,7 +326,21 @@ class InvoiceItem(Base, TimestampMixin):
     unit_price: Mapped[Optional[PyDecimal]] = mapped_column(DECIMAL(10, 2))
     line_total: Mapped[Optional[PyDecimal]] = mapped_column(DECIMAL(12, 2))
     vat_rate: Mapped[Optional[PyDecimal]] = mapped_column(DECIMAL(5, 2))
+    matched_product_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("products.id")
+    )
+    match_method: Mapped[str] = mapped_column(
+        VARCHAR(20),
+        CheckConstraint("match_method IN ('BARCODE','EXACT_CODE','NORMALIZED_CODE','FUZZY','MANUAL','NONE')"),
+        nullable=True
+    )
     match_confidence: Mapped[Optional[PyDecimal]] = mapped_column(DECIMAL(5, 2))
+    manufacturer_code: Mapped[Optional[str]] = mapped_column(VARCHAR(100))
+    status: Mapped[str] = mapped_column(
+        VARCHAR(20),
+        CheckConstraint("status IN ('PENDING','MATCHED','NEW_PRODUCT','MANUAL_REVIEW')"),
+        nullable=True
+    )
 
     __table_args__ = (
         Index("idx_invoice_items_invoice", "invoice_id"),
@@ -240,14 +349,13 @@ class InvoiceItem(Base, TimestampMixin):
 
     # relationships
     invoice = relationship("Invoice", back_populates="items")
-    product = relationship("Product", back_populates="invoice_items")
-
-
-# ──────────────────────────────────────────────
+    product = relationship("Product", back_populates="invoice_items", foreign_keys="InvoiceItem.product_id")
+    organization = relationship("Organization")
 # 5.2.6 product_source_data
 # ──────────────────────────────────────────────
 class ProductSourceData(Base, TimestampMixin):
     __tablename__ = "product_source_data"
+    organization_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False)
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
@@ -273,6 +381,7 @@ class ProductSourceData(Base, TimestampMixin):
 
     # relationships
     product = relationship("Product", back_populates="source_data")
+    organization = relationship("Organization")
 
 
 # ──────────────────────────────────────────────
@@ -280,6 +389,7 @@ class ProductSourceData(Base, TimestampMixin):
 # ──────────────────────────────────────────────
 class ProductSpecification(Base, TimestampMixin):
     __tablename__ = "product_specifications"
+    organization_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False)
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
@@ -310,6 +420,7 @@ class ProductSpecification(Base, TimestampMixin):
 # ──────────────────────────────────────────────
 class PriceHistory(Base):
     __tablename__ = "price_history"
+    organization_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False)
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
@@ -342,6 +453,7 @@ class PriceHistory(Base):
 # ──────────────────────────────────────────────
 class SupplierRule(Base, TimestampMixin):
     __tablename__ = "supplier_rules"
+    organization_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False)
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
@@ -372,6 +484,7 @@ class SupplierRule(Base, TimestampMixin):
 # ──────────────────────────────────────────────
 class SupplierAgreement(Base, TimestampMixin):
     __tablename__ = "supplier_agreements"
+    organization_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False)
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
@@ -395,6 +508,7 @@ class SupplierAgreement(Base, TimestampMixin):
 # ──────────────────────────────────────────────
 class ReviewQueueItem(Base, TimestampMixin):
     __tablename__ = "review_queue"
+    organization_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False)
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
@@ -445,6 +559,7 @@ class ReviewQueueItem(Base, TimestampMixin):
 # ──────────────────────────────────────────────
 class AuditLog(Base):
     __tablename__ = "audit_log"
+    organization_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False)
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
@@ -457,3 +572,120 @@ class AuditLog(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+
+
+# ──────────────────────────────────────────────
+# 5.2.13 parser_configs
+# ──────────────────────────────────────────────
+class ParserConfig(Base, TimestampMixin):
+    __tablename__ = "parser_configs"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(VARCHAR(255), nullable=False)
+    parser_type: Mapped[str] = mapped_column(VARCHAR(50), nullable=False)
+    config_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    # relationships
+    organization = relationship("Organization")
+
+
+# ──────────────────────────────────────────────
+# 5.2.14 enrichment_queue
+# ──────────────────────────────────────────────
+class EnrichmentQueueItem(Base):
+    __tablename__ = "enrichment_queue"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    product_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("products.id", ondelete="CASCADE"), nullable=False
+    )
+    enrichment_level: Mapped[str] = mapped_column(
+        VARCHAR(20),
+        CheckConstraint("enrichment_level IN ('XML','CATALOG','PRODUCT_LIST','MANUAL','WEB_SCRAPING')"),
+        nullable=False,
+    )
+    source: Mapped[Optional[str]] = mapped_column(VARCHAR(50))
+    status: Mapped[str] = mapped_column(
+        VARCHAR(20),
+        CheckConstraint("status IN ('PENDING','PROCESSING','COMPLETED','FAILED')"),
+        default="PENDING",
+    )
+    priority: Mapped[int] = mapped_column(Integer, default=0)
+    payload: Mapped[Optional[dict]] = mapped_column(JSONB)
+    result: Mapped[Optional[dict]] = mapped_column(JSONB)
+    error_message: Mapped[Optional[str]] = mapped_column(Text)
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    # relationships
+    product = relationship("Product")
+
+
+# ──────────────────────────────────────────────
+# 5.2.15 export_logs
+# ──────────────────────────────────────────────
+class ExportLog(Base):
+    __tablename__ = "export_logs"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False
+    )
+    export_type: Mapped[str] = mapped_column(VARCHAR(20), nullable=False)
+    file_format: Mapped[str] = mapped_column(VARCHAR(10), nullable=False)
+    file_path: Mapped[Optional[str]] = mapped_column(VARCHAR(500))
+    status: Mapped[str] = mapped_column(
+        VARCHAR(20),
+        CheckConstraint("status IN ('PENDING','PROCESSING','COMPLETED','FAILED')"),
+        nullable=False,
+    )
+    total_rows: Mapped[Optional[int]] = mapped_column(Integer)
+    error_message: Mapped[Optional[str]] = mapped_column(Text)
+    requested_by: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    # relationships
+    organization = relationship("Organization")
+
+
+# ──────────────────────────────────────────────
+# 5.2.16 scrape_configs
+# ──────────────────────────────────────────────
+class ScrapeConfig(Base, TimestampMixin):
+    __tablename__ = "scrape_configs"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False
+    )
+    supplier_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("suppliers.id", ondelete="CASCADE"), nullable=False
+    )
+    strategy: Mapped[str] = mapped_column(
+        VARCHAR(20),
+        CheckConstraint("strategy IN ('CRAWL4AI','PLAYWRIGHT','SCRAPY','MANUAL')"),
+        nullable=False,
+    )
+    config: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    # relationships
+    supplier = relationship("Supplier")
+    organization = relationship("Organization")

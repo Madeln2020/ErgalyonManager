@@ -1,8 +1,11 @@
+// frontend/src/app/suppliers/page.tsx
 'use client'
 
 import { useEffect, useState, useCallback } from 'react'
 import * as Dialog from '@radix-ui/react-dialog'
 import DashboardLayout from '../DashboardLayout'
+import { apiFetch } from '@/lib/api'
+import { useAuth } from '@/lib/auth'
 
 // ── Types ──
 interface Supplier {
@@ -12,8 +15,8 @@ interface Supplier {
   country: string
   contact_email: string | null
   contact_phone: string | null
-  rules_json: Record<string, any>
   parsing_profile: string | null
+  rules_json: Record<string, any>
   is_active: boolean
   created_at: string
   updated_at: string
@@ -68,24 +71,29 @@ export default function SuppliersPage() {
   const [testResult, setTestResult] = useState<{ normalized_code: string; confidence: number; rules_applied: any[]; validation_errors: string[] } | null>(null)
   const [testLoading, setTestLoading] = useState(false)
 
+  const { token, user } = useAuth()
+
   const showToast = useCallback((type: 'success' | 'error', message: string) => {
     setToast({ type, message })
     setTimeout(() => setToast(null), 4000)
   }, [])
 
   const fetchSuppliers = useCallback(async () => {
+    if (!token) return // Do nothing if no token
     try {
       setLoading(true)
-      const res = await fetch('/api/v1/suppliers')
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      const data = await res.json()
+      const data = await apiFetch<Supplier[]>('/suppliers', { // Added RBAC check
+        headers: {
+          'Authorization': `Bearer ${token}`,
+        }
+      })
       setSuppliers(Array.isArray(data) ? data : [])
     } catch (err: any) {
       setError(err.message)
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [token]) // Dependency on token
 
   useEffect(() => { fetchSuppliers() }, [fetchSuppliers])
 
@@ -174,23 +182,18 @@ export default function SuppliersPage() {
 
       let res: Response
       if (editingId) {
-        res = await fetch(`/api/v1/suppliers/${editingId}`, {
+        res = await apiFetch<Supplier>(`/suppliers/${editingId}`, { // Use RBAC aware API call
           method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
         })
       } else {
-        res = await fetch('/api/v1/suppliers', {
+        res = await apiFetch<Supplier>('/suppliers', { // Use RBAC aware API call
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
         })
       }
 
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}))
-        throw new Error(errData.detail?.[0]?.msg || `HTTP ${res.status}`)
-      }
+      if (!res) throw new Error('Invalid response from server') // Handle API fetch error
 
       showToast('success', editingId ? 'Ο προμηθευτής ενημερώθηκε' : 'Ο προμηθευτής δημιουργήθηκε')
       setDialogOpen(false)
@@ -206,8 +209,7 @@ export default function SuppliersPage() {
     if (!confirm('Είσαι σίγουρος ότι θέλεις να απενεργοποιήσεις αυτόν τον προμηθευτή;')) return
     setDeletingId(id)
     try {
-      const res = await fetch(`/api/v1/suppliers/${id}`, { method: 'DELETE' })
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const res = await apiFetch<void>(`/suppliers/${id}`, { method: 'DELETE' })
       showToast('success', 'Ο προμηθευτής απενεργοποιήθηκε')
       await fetchSuppliers()
     } catch (err: any) {
@@ -222,9 +224,7 @@ export default function SuppliersPage() {
     <DashboardLayout>
       {/* Toast */}
       {toast && (
-        <div className={`fixed top-4 right-4 z-50 px-4 py-3 rounded-lg shadow-lg text-sm font-medium transition-all ${
-          toast.type === 'success' ? 'bg-green-600 text-white' : 'bg-red-600 text-white'
-        }`}>
+        <div className={`fixed top-4 right-4 z-50 px-4 py-3 rounded-lg shadow-lg text-sm font-medium transition-all ${toast.type === 'success' ? 'bg-green-600 text-white' : 'bg-red-600 text-white'}`}>
           {toast.message}
         </div>
       )}
@@ -269,12 +269,7 @@ export default function SuppliersPage() {
                 <td className="px-4 py-3 text-gray-600 font-mono text-xs">{s.vat_number || '—'}</td>
                 <td className="px-4 py-3 text-gray-600 text-xs">{s.contact_email || '—'}</td>
                 <td className="px-4 py-3">
-                  <span className={`px-2 py-0.5 rounded text-xs font-medium ${
-                    s.parsing_profile === 'xml' ? 'bg-green-100 text-green-700' :
-                    s.parsing_profile === 'pdf' ? 'bg-purple-100 text-purple-700' :
-                    s.parsing_profile === 'excel' ? 'bg-blue-100 text-blue-700' :
-                    'bg-gray-100 text-gray-600'
-                  }`}>{s.parsing_profile || 'auto'}</span>
+                  <span className={`px-2 py-0.5 rounded text-xs font-medium ${s.parsing_profile === 'xml' ? 'bg-green-100 text-green-700' : s.parsing_profile === 'pdf' ? 'bg-purple-100 text-purple-700' : s.parsing_profile === 'excel' ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600'}`}>{s.parsing_profile || 'auto'}</span>
                 </td>
                 <td className="px-4 py-3">
                   {s.rules_json && Object.keys(s.rules_json).length > 0 ? (
@@ -284,9 +279,7 @@ export default function SuppliersPage() {
                   )}
                 </td>
                 <td className="px-4 py-3">
-                  <span className={`inline-flex items-center gap-1 text-xs font-medium ${
-                    s.is_active ? 'text-green-600' : 'text-red-500'
-                  }`}>
+                  <span className={`inline-flex items-center gap-1 text-xs font-medium ${s.is_active ? 'text-green-600' : 'text-red-500'}`}>
                     <span className={`w-2 h-2 rounded-full ${s.is_active ? 'bg-green-500' : 'bg-red-400'}`} />
                     {s.is_active ? 'Ενεργός' : 'Ανενεργός'}
                   </span>
@@ -384,7 +377,7 @@ export default function SuppliersPage() {
               {/* Rules JSON */}
               <div>
                 <div className="flex items-center justify-between mb-1">
-                  <label className="block text-xs font-medium text-gray-700">Κανόνες (rules_json)</label>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Κανόνες (rules_json)</label>
                   <div className="flex gap-1">
                     {Object.keys(RULE_PRESETS).map(key => (
                       <button
@@ -412,7 +405,7 @@ export default function SuppliersPage() {
                     onClick={() => { setTestDialogOpen(true); setTestInput(''); setTestResult(null); }}
                     className="px-3 py-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-medium rounded transition-colors"
                   >
-                    🧪 Δοκίμασε Κανόνες
+                    🧪 Δοκιμή Κανόνων
                   </button>
                 </div>
               </div>
@@ -426,7 +419,7 @@ export default function SuppliersPage() {
               <button
                 onClick={handleSave}
                 disabled={saving}
-                className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors disabled:opacity-50"
+                className={`px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors disabled:opacity-50 ${saving ? 'cursor-not-allowed' : ''}`}
               >
                 {saving ? 'Αποθήκευση...' : editingId ? 'Ενημέρωση' : 'Δημιουργία'}
               </button>
@@ -454,7 +447,7 @@ export default function SuppliersPage() {
                   onChange={e => setTestInput(e.target.value)}
                   onKeyDown={e => { if (e.key === 'Enter') handleTestRules() }}
                   className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  placeholder="e.g. 03-12345"
+                  placeholder='e.g. 03-12345'
                 />
               </div>
 
@@ -463,7 +456,7 @@ export default function SuppliersPage() {
                 disabled={testLoading}
                 className="w-full px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 transition-colors disabled:opacity-50"
               >
-                {testLoading ? 'Δοκιμή...' : '🧪 Δοκίμασε'}
+                {testLoading ? 'Δοκιμή...' : '🧪 Δοκιμή'}
               </button>
 
               {testResult && (
@@ -498,10 +491,6 @@ export default function SuppliersPage() {
                 </div>
               )}
             </div>
-
-            <Dialog.Close className="absolute top-4 right-4 text-gray-400 hover:text-gray-600">
-              ✕
-            </Dialog.Close>
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog.Root>

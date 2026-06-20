@@ -1,4 +1,4 @@
-# EDM v2 — Invoices Router (§6.1)
+# EDM v2 — Invoices Router (§6.1) — Multi-tenant
 
 import io
 from uuid import UUID
@@ -9,8 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.database import get_db
-from app.models import Invoice, InvoiceItem
+from app.models import Invoice, InvoiceItem, User
 from app.schemas import InvoiceItemRead, InvoiceRead
+from app.auth import get_current_user, require_role, Role
 from app.services.pipeline import process_invoice_file
 
 router = APIRouter(prefix="/api/v1/invoices", tags=["invoices"])
@@ -22,6 +23,7 @@ async def upload_invoice(
     document_type: str = Form("invoice"),
     files: list[UploadFile] = File(...),
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """Upload one or more invoice/offer files. Auto-processes them."""
     invoices = []
@@ -35,21 +37,21 @@ async def upload_invoice(
         elif ext in ("xlsx", "xls", "csv"):
             fmt = "excel"
 
-        # Read file content into memory
         content = await f.read()
 
         invoice = Invoice(
             supplier_id=supplier_id,
+            organization_id=current_user.organization_id,
             document_type=document_type,
             file_path=f"uploads/{f.filename}",
             file_format=fmt,
             status="uploaded",
+            created_by=current_user.id,
         )
         db.add(invoice)
         await db.flush()
         await db.refresh(invoice)
 
-        # Process through pipeline (sync for now; will move to Celery in Phase 2)
         try:
             await process_invoice_file(invoice, content, db)
         except Exception as e:
@@ -66,8 +68,17 @@ async def upload_invoice(
 
 
 @router.get("/{invoice_id}", response_model=InvoiceRead)
-async def get_invoice(invoice_id: UUID, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Invoice).where(Invoice.id == invoice_id))
+async def get_invoice(
+    invoice_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    result = await db.execute(
+        select(Invoice).where(
+            Invoice.id == invoice_id,
+            Invoice.organization_id == current_user.organization_id,
+        )
+    )
     invoice = result.scalar_one_or_none()
     if not invoice:
         raise HTTPException(status_code=404, detail="Invoice not found")
@@ -75,10 +86,18 @@ async def get_invoice(invoice_id: UUID, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/{invoice_id}/items", response_model=list[InvoiceItemRead])
-async def get_invoice_items(invoice_id: UUID, db: AsyncSession = Depends(get_db)):
+async def get_invoice_items(
+    invoice_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     result = await db.execute(
         select(InvoiceItem)
-        .where(InvoiceItem.invoice_id == invoice_id)
+        .join(Invoice, InvoiceItem.invoice_id == Invoice.id)
+        .where(
+            InvoiceItem.invoice_id == invoice_id,
+            Invoice.organization_id == current_user.organization_id,
+        )
         .order_by(InvoiceItem.line_number)
     )
     return result.scalars().all()

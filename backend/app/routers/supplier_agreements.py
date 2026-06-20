@@ -1,21 +1,24 @@
 """
 EDM v2 – Supplier Agreement Router
 Handles document upload, full‑text indexing, and RAG search on supplier agreements.
+Multi-tenant with auth.
 """
 
 import os
-from uuid import uuid4
+from uuid import uuid4, UUID
+from datetime import date
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy import select, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.models import SupplierAgreement
+from app.models import SupplierAgreement, User
 from app.schemas import (
     SupplierAgreementCreate,
     SupplierAgreementRead,
     SupplierAgreementSearch,
 )
+from app.auth import get_current_user, require_role, Role
 
 router = APIRouter(prefix="/api/v1/supplier-agreements", tags=["supplier-agreements"])
 
@@ -23,11 +26,14 @@ router = APIRouter(prefix="/api/v1/supplier-agreements", tags=["supplier-agreeme
 # ── LIST / SEARCH ──────────────────────────────────────────
 @router.get("/", response_model=list[SupplierAgreementRead])
 async def list_agreements(
-    supplier_id: str | None = None,
+    supplier_id: UUID | None = None,
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    """List all supplier agreements, optionally filtered by supplier_id."""
-    stmt = select(SupplierAgreement)
+    """List supplier agreements scoped to the current organization."""
+    stmt = select(SupplierAgreement).where(
+        SupplierAgreement.organization_id == current_user.organization_id
+    )
     if supplier_id:
         stmt = stmt.where(SupplierAgreement.supplier_id == supplier_id)
     stmt = stmt.order_by(SupplierAgreement.created_at.desc())
@@ -37,10 +43,17 @@ async def list_agreements(
 
 # ── GET SINGLE ─────────────────────────────────────────────
 @router.get("/{agreement_id}", response_model=SupplierAgreementRead)
-async def get_agreement(agreement_id: str, db: AsyncSession = Depends(get_db)):
+async def get_agreement(
+    agreement_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """Retrieve a single agreement by ID."""
     result = await db.execute(
-        select(SupplierAgreement).where(SupplierAgreement.id == agreement_id)
+        select(SupplierAgreement).where(
+            SupplierAgreement.id == agreement_id,
+            SupplierAgreement.organization_id == current_user.organization_id,
+        )
     )
     agreement = result.scalar_one_or_none()
     if not agreement:
@@ -52,15 +65,14 @@ async def get_agreement(agreement_id: str, db: AsyncSession = Depends(get_db)):
 @router.post("/upload", response_model=SupplierAgreementRead)
 async def upload_agreement(
     file: UploadFile = File(...),
-    supplier_id: str = Form(...),
+    supplier_id: UUID = Form(...),
     title: str | None = Form(None),
-    valid_from: str | None = Form(None),
-    valid_to: str | None = Form(None),
+    valid_from: date | None = Form(None),
+    valid_to: date | None = Form(None),
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    """Upload a PDF/text agreement file and create an index entry for RAG."""
-
-    # Save file to a persistent location
+    """Upload a PDF/text agreement file."""
     UPLOAD_DIR = "/home/admin/edm-v2/backend/uploads/agreements"
     os.makedirs(UPLOAD_DIR, exist_ok=True)
 
@@ -72,9 +84,9 @@ async def upload_agreement(
     with open(file_path, "wb") as f:
         f.write(content)
 
-    # Create the database record
     agreement = SupplierAgreement(
         supplier_id=supplier_id,
+        organization_id=current_user.organization_id,
         title=title or file.filename,
         file_path=file_path,
         valid_from=valid_from,
@@ -92,18 +104,11 @@ async def upload_agreement(
 async def search_agreements(
     req: SupplierAgreementSearch,
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    """
-    Full‑text search across supplier agreement titles and file names.
-
-    This is a basic implementation that searches the agreement *title* and
-    *file_path* fields. For a complete RAG pipeline, this should be
-    extended to:
-    - Extract text from the uploaded PDF/DOCX/TXT file.
-    - Build a vector index (pgvector/FAISS) on the extracted content.
-    - Use an LLM to generate enriched suggestions.
-    """
+    """Full‑text search across supplier agreement titles."""
     stmt = select(SupplierAgreement).where(
+        SupplierAgreement.organization_id == current_user.organization_id,
         or_(
             func.to_tsvector("english", SupplierAgreement.title).match(req.query),
             func.to_tsvector("english", SupplierAgreement.file_path).match(req.query),
@@ -118,7 +123,7 @@ async def search_agreements(
 
     return {
         "query": req.query,
-        "results": [a.to_dict() if hasattr(a, "to_dict") else {
+        "results": [{
             "id": str(a.id),
             "supplier_id": str(a.supplier_id),
             "title": a.title,
@@ -129,20 +134,26 @@ async def search_agreements(
 
 # ── DELETE ─────────────────────────────────────────────────
 @router.delete("/{agreement_id}", status_code=204)
-async def delete_agreement(agreement_id: str, db: AsyncSession = Depends(get_db)):
+async def delete_agreement(
+    agreement_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """Delete an agreement and its file."""
     result = await db.execute(
-        select(SupplierAgreement).where(SupplierAgreement.id == agreement_id)
+        select(SupplierAgreement).where(
+            SupplierAgreement.id == agreement_id,
+            SupplierAgreement.organization_id == current_user.organization_id,
+        )
     )
     agreement = result.scalar_one_or_none()
     if not agreement:
         raise HTTPException(status_code=404, detail="Agreement not found")
 
-    # Remove the file from disk
     try:
         os.remove(agreement.file_path)
     except OSError:
-        pass  # File may not exist
+        pass
 
     await db.delete(agreement)
     await db.commit()

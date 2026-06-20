@@ -3,6 +3,8 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.services.rag_service import RAGService
+from app.auth import require_role, Role
+from app.models import User
 
 router = APIRouter(prefix="/api/v1/rag", tags=["rag"])
 
@@ -15,13 +17,21 @@ class EnrichRequest(BaseModel):
     context: str
 
 @router.post("/search")
-async def rag_search(req: SearchRequest, db: AsyncSession = Depends(get_db)):
+async def rag_search(
+    req: SearchRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role(Role.VIEWER)),
+):
     service = RAGService(db)
     results = await service.search(req.query, req.limit)
     return {"results": results}
 
 @router.post("/enrich")
-async def rag_enrich(req: EnrichRequest, db: AsyncSession = Depends(get_db)):
+async def rag_enrich(
+    req: EnrichRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role(Role.USER)),
+):
     service = RAGService(db)
     try:
         prod = await service.enrich(req.product_id, req.context)

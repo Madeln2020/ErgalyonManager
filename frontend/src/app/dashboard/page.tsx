@@ -1,6 +1,9 @@
+// frontend/src/app/dashboard/page.tsx
 'use client'
 
 import { useEffect, useState } from 'react'
+import { apiFetch } from '@/lib/api'
+import { useAuth } from '@/lib/auth'
 
 interface Stats {
   products: number
@@ -43,29 +46,39 @@ function SkeletonRow() {
 }
 
 export default function DashboardPage() {
+  const { token, user, isAuthenticated, loading: authLoading } = useAuth()
   const [stats, setStats] = useState<Stats>({ products: 0, suppliers: 0, reviewOpen: 0, reviewHigh: 0, invoices: 0 })
   const [recent, setRecent] = useState<RecentProduct[]>([])
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
+    // Only fetch data if we have a token
+    if (!token) {
+      setLoading(false)
+      return
+    }
+
     Promise.all([
-      fetch('/api/v1/products?limit=1').then(r => r.json()).catch(() => ({ total: 0 })),
-      fetch('/api/v1/suppliers').then(r => r.json()).catch(() => []),
-      fetch('/api/v1/review-queue?status=open&limit=1').then(r => r.json()).catch(() => ({ total: 0 })),
-      fetch('/api/v1/review-queue?status=open&priority=HIGH&limit=1').then(r => r.json()).catch(() => ({ total: 0 })),
-      fetch('/api/v1/products?limit=5').then(r => r.json()).catch(() => ({ items: [] })),
+      apiFetch<{ total: number }>('/api/v1/products?limit=1'),
+      apiFetch<any[]>('/api/v1/suppliers'),
+      apiFetch<{ total: number }>('/api/v1/review-queue?status=open&limit=1'),
+      apiFetch<{ total: number }>('/api/v1/review-queue?status=open&priority=HIGH&limit=1'),
+      apiFetch<{ items: RecentProduct[] }>('/api/v1/products?limit=5'),
     ]).then(([products, suppliers, review, reviewHigh, recentProds]) => {
       setStats({
         products: products.total || 0,
         suppliers: Array.isArray(suppliers) ? suppliers.length : 0,
         reviewOpen: review.total || 0,
         reviewHigh: reviewHigh.total || 0,
-        invoices: 0,
+        invoices: 0, // We don't have an invoices count endpoint yet
       })
       setRecent(recentProds.items || [])
       setLoading(false)
+    }).catch(err => {
+      console.error('Failed to fetch dashboard data:', err)
+      setLoading(false)
     })
-  }, [])
+  }, [token]) // Re-fetch when token changes
 
   const cards = [
     { label: 'Προϊόντα', value: stats.products, icon: '🔧', color: 'bg-blue-500' },
@@ -141,7 +154,7 @@ export default function DashboardPage() {
                   <span className="font-mono text-xs text-blue-600 flex-shrink-0">{p.ergalyon_code}</span>
                   <span className="text-sm text-gray-800 truncate">{p.description}</span>
                 </div>
-                <span className="text-sm font-mono text-gray-600 flex-shrink-0">
+                <span className="sm font-mono text-gray-600 flex-shrink-0">
                   {p.current_price ? `${Number(p.current_price).toFixed(2)}€` : '—'}
                 </span>
               </div>

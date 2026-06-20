@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, HttpUrl
 from ..services.web_scraper import (
     WebScraper,
@@ -7,6 +7,8 @@ from ..services.web_scraper import (
     WebScraperHTTPError,
     WebScraperConnectionError,
 )
+from app.auth import require_role, Role
+from app.models import User
 
 router = APIRouter(prefix="/api/v1/scrape", tags=["scrape"])
 
@@ -17,7 +19,10 @@ class ScrapeRequest(BaseModel):
 
 
 @router.post("/", response_model=list)
-async def scrape(request: ScrapeRequest):
+async def scrape(
+    request: ScrapeRequest,
+    current_user: User = Depends(require_role(Role.ADMIN)),
+):
     try:
         scraper = WebScraper(str(request.url))
         results = scraper.scrape(request.selector)

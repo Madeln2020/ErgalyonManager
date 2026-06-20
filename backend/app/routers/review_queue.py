@@ -1,4 +1,4 @@
-# EDM v2 — Review Queue Router (§6.1, §7)
+# EDM v2 — Review Queue Router (§6.1, §7) — Multi-tenant
 
 from uuid import UUID
 
@@ -7,8 +7,9 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.models import ReviewQueueItem
+from app.models import ReviewQueueItem, User
 from app.schemas import ReviewQueueList, ReviewQueueRead, ReviewResolve
+from app.auth import get_current_user, require_role, Role
 
 router = APIRouter(prefix="/api/v1/review-queue", tags=["review"])
 
@@ -21,8 +22,11 @@ async def list_review_queue(
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    query = select(ReviewQueueItem)
+    query = select(ReviewQueueItem).where(
+        ReviewQueueItem.organization_id == current_user.organization_id
+    )
 
     if status:
         query = query.where(ReviewQueueItem.status == status)
@@ -31,11 +35,9 @@ async def list_review_queue(
     if review_type:
         query = query.where(ReviewQueueItem.review_type == review_type)
 
-    # Total
     count_q = select(func.count()).select_from(query.subquery())
     total = (await db.execute(count_q)).scalar()
 
-    # Sorted by priority (CRITICAL first) then oldest first
     priority_order = func.array_position(
         ["CRITICAL", "HIGH", "MEDIUM", "LOW"], ReviewQueueItem.priority
     )
@@ -55,9 +57,13 @@ async def resolve_review_item(
     review_id: UUID,
     resolution: ReviewResolve,
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     result = await db.execute(
-        select(ReviewQueueItem).where(ReviewQueueItem.id == review_id)
+        select(ReviewQueueItem).where(
+            ReviewQueueItem.id == review_id,
+            ReviewQueueItem.organization_id == current_user.organization_id,
+        )
     )
     item = result.scalar_one_or_none()
     if not item:
@@ -65,6 +71,10 @@ async def resolve_review_item(
 
     item.status = "resolved"
     item.resolution = resolution.resolution
+    item.resolved_by = current_user.id
+
+    from datetime import datetime, timezone
+    item.resolved_at = datetime.now(timezone.utc)
 
     await db.flush()
     await db.refresh(item)

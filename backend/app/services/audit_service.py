@@ -1,15 +1,12 @@
-"""EDM v2 — Audit trail service (§4 Observability / Event Audit).
-
-Provides a lightweight ``log_event`` function that persists lifecycle
-events to the ``audit_log`` table.  Every mutation to core entities
-(suppliers, products, invoices, review queue) should call this so we
-have a complete, queryable history of what changed, when, and by whom.
-"""
+# EDM v2 — Audit trail service (§4 Observability / Event Audit)
+# Provides a lightweight log_event function that persists lifecycle events to the audit_log table.
 
 import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 from uuid import UUID
+
+from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,6 +17,21 @@ from app.models import AuditLog
 logger = logging.getLogger("edm.audit")
 
 
+def _convert_to_json_serializable(obj: Any) -> Any:
+    """Recursively convert UUID and Decimal objects to JSON-serializable values."""
+    if isinstance(obj, UUID):
+        return str(obj)
+    elif isinstance(obj, Decimal):
+        # Convert to float for JSON; note: may lose precision, but acceptable for audit
+        return float(obj)
+    elif isinstance(obj, dict):
+        return {k: _convert_to_json_serializable(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_convert_to_json_serializable(v) for v in obj]
+    else:
+        return obj
+
+
 async def log_event(
     entity_type: str,
     entity_id: UUID,
@@ -28,37 +40,18 @@ async def log_event(
     payload: Optional[Dict[str, Any]] = None,
     session: Optional[AsyncSession] = None,
 ) -> bool:
-    """Persist one audit event to the database.
+    """Persist one audit event to the database."""
+    # Convert UUIDs and Decimals in payload to JSON-serializable values
+    safe_payload = _convert_to_json_serializable(payload) if payload else None
 
-    Parameters
-    ----------
-    entity_type:
-        Domain entity, e.g. ``"supplier"``, ``"product"``, ``"invoice"``,
-        ``"review_queue"``, ``"supplier_rule"``.
-    entity_id:
-        UUID of the affected entity.
-    event_name:
-        Short human‑readable verb, e.g. ``"created"``, ``"updated"``,
-        ``"deleted"``, ``"approved"``, ``"rejected"``, ``"uploaded"``.
-    user_id:
-        Optional UUID of the user / system that initiated the change.
-    payload:
-        Optional JSON-serialisable dict with details (old/new values, etc).
-    session:
-        Optional existing DB session.  If omitted, a new session is created
-        and committed.
-
-    Returns
-    -------
-    ``True`` on success, ``False`` on failure (logged as error).
-    """
     entry = AuditLog(
         entity_type=entity_type,
         entity_id=entity_id,
         event_name=event_name,
         user_id=user_id,
-        payload=payload or {},
+        payload=safe_payload or {},
         created_at=datetime.now(timezone.utc),
+        organization_id=UUID("00000000-0000-0000-0000-000000000001"),
     )
 
     own_session = session is None
