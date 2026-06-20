@@ -29,7 +29,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         settings.APP_VERSION,
         settings.ENVIRONMENT,
     )
-    # ── TODO: Initialise connection pools, warm caches, etc. ──
+
+    # ── Ensure MinIO bucket exists ──────────────────────────
+    try:
+        from app.services.minio_client import ensure_bucket_exists
+        ensure_bucket_exists()
+        logger.info("MinIO bucket 'raw-uploads' ready.")
+    except Exception as exc:
+        logger.warning("MinIO bucket check failed (non-fatal): %s", exc)
+
+    # ── Initialise connection pools, warm caches, etc. ──────
     yield
     # ── Shutdown: dispose engines, close connections ──────────
     from app.database import engine
@@ -103,13 +112,14 @@ async def health_check():
 
 # ── Router registration ───────────────────────────────────────────────
 # Register all routers as they are implemented
-from app.routers import suppliers, products, catalogs, auth, health
+from app.routers import suppliers, products, catalogs, auth, health, upload
 
 app.include_router(suppliers.router)
 app.include_router(products.router)
 app.include_router(catalogs.router)
 app.include_router(auth.router)
 app.include_router(health.router)
+app.include_router(upload.router)
 
 
 # ── Global exception handler ───────────────────────────────────────
