@@ -103,15 +103,33 @@ class Supplier(Base, TimestampMixin):
         UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False
     )
     name: Mapped[str] = mapped_column(VARCHAR(255), nullable=False)  # Display Name
+    code: Mapped[Optional[str]] = mapped_column(VARCHAR(50), unique=True)  # Supplier code (e.g. ΠΡΟΜ-xxxxx, "BOSCH") – used by parsers
     legal_name: Mapped[Optional[str]] = mapped_column(VARCHAR(255))
-    afm: Mapped[Optional[str]] = mapped_column(VARCHAR(20), unique=True)  # AADE Tax ID (ΑΦΜ)
+    afm: Mapped[Optional[str]] = mapped_column(VARCHAR(20), unique=True)  # AADE Tax ID (ΑΦΜ / VAT)
     aade_data: Mapped[Optional[dict]] = mapped_column(JSONB)  # cached JSON: DOY, address, registration status, activity codes
+    address: Mapped[Optional[str]] = mapped_column(VARCHAR(500))  # Physical address
+    country: Mapped[str] = mapped_column(VARCHAR(100), default="Greece")  # Country
+    language: Mapped[str] = mapped_column(VARCHAR(20), default="Greek")  # Preferred language
     website: Mapped[Optional[str]] = mapped_column(VARCHAR(255))
     contact_email: Mapped[Optional[str]] = mapped_column(VARCHAR(255))
     contact_phone: Mapped[Optional[str]] = mapped_column(VARCHAR(50))
     contact_persons: Mapped[Optional[list]] = mapped_column(JSONB)  # list of dicts: {name, role, phone, email}
     payment_terms: Mapped[Optional[str]] = mapped_column(VARCHAR(100))
     notes: Mapped[Optional[Text]] = mapped_column(Text)
+    supplier_type: Mapped[Optional[str]] = mapped_column(VARCHAR(50))  # Manufacturer / Distributor / Importer
+    default_vat_rate: Mapped[PyDecimal] = mapped_column(
+        DECIMAL(5, 2), default=PyDecimal("24.00")
+    )
+    default_unit: Mapped[str] = mapped_column(VARCHAR(20), default="ΤΕΜ")
+    default_wholesale_markup: Mapped[PyDecimal] = mapped_column(
+        DECIMAL(8, 2), default=PyDecimal("30.00")
+    )
+    default_retail_markup: Mapped[PyDecimal] = mapped_column(
+        DECIMAL(8, 2), default=PyDecimal("55.00")
+    )
+    brands: Mapped[Optional[list]] = mapped_column(JSONB, default=list)  # List of associated brands
+    default_brand: Mapped[Optional[str]] = mapped_column(VARCHAR(100))  # Default brand name
+    pylon_supplier_code: Mapped[Optional[str]] = mapped_column(VARCHAR(50))  # Pylon ERP supplier code
     status: Mapped[str] = mapped_column(
         VARCHAR(20),
         CheckConstraint("status IN ('ACTIVE','INACTIVE','BLACKLISTED')"),

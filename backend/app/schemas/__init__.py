@@ -65,28 +65,52 @@ class OrganizationRead(BaseModel):
 # ──────────────────────────────────────────
 class SupplierCreate(BaseModel):
     name: str = Field(..., max_length=255)
+    code: Optional[str] = Field(None, max_length=50)
     legal_name: Optional[str] = Field(None, max_length=255)
     afm: Optional[str] = Field(None, max_length=20)
+    address: Optional[str] = Field(None, max_length=500)
+    country: str = "Greece"
+    language: str = "Greek"
     website: Optional[str] = Field(None, max_length=255)
     contact_email: Optional[str] = Field(None, max_length=255)
     contact_phone: Optional[str] = Field(None, max_length=50)
     contact_persons: Optional[list] = None
     payment_terms: Optional[str] = Field(None, max_length=100)
     notes: Optional[str] = None
+    supplier_type: Optional[str] = Field(None, max_length=50)
+    default_vat_rate: Optional[Decimal] = Decimal("24.00")
+    default_unit: str = "ΤΕΜ"
+    default_wholesale_markup: Optional[Decimal] = Decimal("30.00")
+    default_retail_markup: Optional[Decimal] = Decimal("55.00")
+    brands: Optional[list] = None
+    default_brand: Optional[str] = Field(None, max_length=100)
+    pylon_supplier_code: Optional[str] = Field(None, max_length=50)
     code_normalization_rules: Optional[dict] = None
     default_parser_id: Optional[UUID] = None
 
 
 class SupplierUpdate(BaseModel):
     name: Optional[str] = None
+    code: Optional[str] = None
     legal_name: Optional[str] = None
     afm: Optional[str] = None
+    address: Optional[str] = None
+    country: Optional[str] = None
+    language: Optional[str] = None
     website: Optional[str] = None
     contact_email: Optional[str] = None
     contact_phone: Optional[str] = None
     contact_persons: Optional[list] = None
     payment_terms: Optional[str] = None
     notes: Optional[str] = None
+    supplier_type: Optional[str] = None
+    default_vat_rate: Optional[Decimal] = None
+    default_unit: Optional[str] = None
+    default_wholesale_markup: Optional[Decimal] = None
+    default_retail_markup: Optional[Decimal] = None
+    brands: Optional[list] = None
+    default_brand: Optional[str] = None
+    pylon_supplier_code: Optional[str] = None
     code_normalization_rules: Optional[dict] = None
     default_parser_id: Optional[UUID] = None
     status: Optional[str] = None
@@ -95,15 +119,27 @@ class SupplierUpdate(BaseModel):
 class SupplierRead(BaseModel):
     id: UUID
     name: str
+    code: Optional[str]
     legal_name: Optional[str]
     afm: Optional[str]
     aade_data: Optional[dict]
+    address: Optional[str]
+    country: str
+    language: str
     website: Optional[str]
     contact_email: Optional[str]
     contact_phone: Optional[str]
     contact_persons: Optional[list]
     payment_terms: Optional[str]
     notes: Optional[str]
+    supplier_type: Optional[str]
+    default_vat_rate: Decimal
+    default_unit: str
+    default_wholesale_markup: Decimal
+    default_retail_markup: Decimal
+    brands: Optional[list]
+    default_brand: Optional[str]
+    pylon_supplier_code: Optional[str]
     status: str
     deleted_at: Optional[datetime]
     code_normalization_rules: Optional[dict]
@@ -116,8 +152,11 @@ class SupplierRead(BaseModel):
 class SupplierListRead(BaseModel):
     id: UUID
     name: str
+    code: Optional[str]
     afm: Optional[str]
     contact_email: Optional[str]
+    default_brand: Optional[str]
+    supplier_type: Optional[str]
     status: str
     created_at: datetime
 
