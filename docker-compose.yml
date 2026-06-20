@@ -1,10 +1,20 @@
+# ═══════════════════════════════════════════════════════════════════
+# EDM v2.1 — Docker Compose (Development)
+# ═══════════════════════════════════════════════════════════════════
+# Infrastructure: PostgreSQL 15 + Redis 7 + MinIO
+# Usage:  docker compose up -d
+#         docker compose down
+# ═══════════════════════════════════════════════════════════════════
+
 services:
+  # ── PostgreSQL 15 (primary data store) ──────────────────────────
   postgres:
     image: postgres:15-alpine
+    container_name: edm-postgres
     environment:
       POSTGRES_DB: edm_v2
       POSTGRES_USER: edm
-      POSTGRES_PASSWORD: edm_password
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-edm_password}
     ports:
       - "5432:5432"
     volumes:
@@ -14,30 +24,78 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - edm-net
 
+  # ── Redis 7 (queue broker / cache) ─────────────────────────────
   redis:
     image: redis:7-alpine
+    container_name: edm-redis
     ports:
       - "6379:6379"
+    volumes:
+      - redis_data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 5s
       retries: 5
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - edm-net
 
-  celery_worker:
-    build:
-      context: .
-      dockerfile: ./backend/Dockerfile # Assuming you have a Dockerfile for the backend
-    command: celery -A backend.celery_worker.celery_app worker --loglevel=info
+  # ── MinIO (S3-compatible object store for uploads/assets) ──────
+  minio:
+    image: minio/minio:latest
+    container_name: edm-minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # Web Console
     environment:
-      - DATABASE_URL=postgresql+asyncpg://edm:edm_password@postgres:5432/edm_v2
-      - REDIS_URL=redis://redis:6379/0
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - edm-net
+
+  # ── MinIO bucket initialiser (one-shot) ────────────────────────
+  minio-init:
+    image: minio/mc:latest
+    container_name: edm-minio-init
     depends_on:
-      postgres:
+      minio:
         condition: service_healthy
-      redis:
-        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      sleep 2;
+      mc alias set edm http://minio:9000 ${MINIO_ACCESS_KEY:-minioadmin} ${MINIO_SECRET_KEY:-minioadmin};
+      mc mb edm/${MINIO_BUCKET:-edm-uploads} --ignore-existing;
+      mc policy set public edm/${MINIO_BUCKET:-edm-uploads} || true;
+      echo 'MinIO bucket initialised';
+      "
+    networks:
+      - edm-net
 
 volumes:
   pgdata:
+    driver: local
+  redis_data:
+    driver: local
+  minio_data:
+    driver: local
+
+networks:
+  edm-net:
+    driver: bridge
