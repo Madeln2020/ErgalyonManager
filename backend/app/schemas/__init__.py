@@ -1,466 +1,535 @@
-# EDM v2 Backend — Pydantic Schemas (aligned with models)
+# ═══════════════════════════════════════════════════════════════════════
+# EDM v2.1 — Pydantic Schemas (aligned with 15-table data model)
+# ═══════════════════════════════════════════════════════════════════════
+
+from __future__ import annotations
 
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Optional, List
+from typing import Any, Optional
 from uuid import UUID
 
 from pydantic import BaseModel, Field
 
 
 # ──────────────────────────────────────────
-# Auth & Users
+# 1. Company
 # ──────────────────────────────────────────
-class RegisterRequest(BaseModel):
+class CompanyCreate(BaseModel):
+    name: str = Field(..., max_length=255)
+    vat_number: Optional[str] = Field(None, max_length=20)
+    settings_json: Optional[dict] = None
+
+
+class CompanyUpdate(BaseModel):
+    name: Optional[str] = None
+    vat_number: Optional[str] = None
+    settings_json: Optional[dict] = None
+
+
+class CompanyRead(BaseModel):
+    id: UUID
+    name: str
+    vat_number: Optional[str]
+    settings_json: Optional[dict]
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+# ──────────────────────────────────────────
+# 2. User
+# ──────────────────────────────────────────
+class UserCreate(BaseModel):
+    company_id: UUID
     email: str = Field(..., max_length=255)
-    password: str = Field(..., min_length=6, max_length=128)
+    password_hash: str = Field(..., max_length=255)
+    role: str = Field(..., pattern=r"^(admin|operator|viewer)$")
     display_name: Optional[str] = Field(None, max_length=255)
-    organization_name: str = Field(..., max_length=255, description="Name of the new organization to create")
-
-
-class LoginRequest(BaseModel):
-    email: str
-    password: str
-
-
-class TokenResponse(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
-    user: "UserRead"
+    is_active: bool = True
 
 
 class UserRead(BaseModel):
     id: UUID
+    company_id: UUID
     email: str
     role: str
     display_name: Optional[str]
     is_active: bool
-    organization_id: UUID
+    last_login: Optional[datetime]
     created_at: datetime
+    updated_at: datetime
 
     model_config = {"from_attributes": True}
 
 
-# ──────────────────────────────────────────
-# Organization
-# ──────────────────────────────────────────
-class OrganizationCreate(BaseModel):
-    name: str = Field(..., max_length=255)
-    aade_afm: Optional[str] = Field(None, max_length=20)
-
-
-class OrganizationRead(BaseModel):
-    id: UUID
-    name: str
-    aade_afm: Optional[str]
-    address: Optional[str]
-    settings: Optional[dict]
-    created_at: datetime
-
-    model_config = {"from_attributes": True}
+class UserUpdate(BaseModel):
+    email: Optional[str] = None
+    role: Optional[str] = None
+    display_name: Optional[str] = None
+    is_active: Optional[bool] = None
 
 
 # ──────────────────────────────────────────
-# Supplier
+# 3. Supplier
 # ──────────────────────────────────────────
 class SupplierCreate(BaseModel):
+    company_id: UUID
     name: str = Field(..., max_length=255)
-    code: Optional[str] = Field(None, max_length=50)
-    legal_name: Optional[str] = Field(None, max_length=255)
-    afm: Optional[str] = Field(None, max_length=20)
-    address: Optional[str] = Field(None, max_length=500)
-    country: str = "Greece"
-    language: str = "Greek"
-    website: Optional[str] = Field(None, max_length=255)
-    contact_email: Optional[str] = Field(None, max_length=255)
-    contact_phone: Optional[str] = Field(None, max_length=50)
-    contact_persons: Optional[list] = None
-    payment_terms: Optional[str] = Field(None, max_length=100)
-    notes: Optional[str] = None
-    supplier_type: Optional[str] = Field(None, max_length=50)
-    default_vat_rate: Optional[Decimal] = Decimal("24.00")
-    default_unit: str = "ΤΕΜ"
-    default_wholesale_markup: Optional[Decimal] = Decimal("30.00")
-    default_retail_markup: Optional[Decimal] = Decimal("55.00")
-    brands: Optional[list] = None
-    default_brand: Optional[str] = Field(None, max_length=100)
-    pylon_supplier_code: Optional[str] = Field(None, max_length=50)
-    code_normalization_rules: Optional[dict] = None
-    default_parser_id: Optional[UUID] = None
+    vat_number: Optional[str] = Field(None, max_length=20)
+    tax_profile_json: Optional[dict] = None
+    contacts_json: Optional[dict] = None
+    default_currency: str = "EUR"
+    default_parser: Optional[str] = Field(None, max_length=50)
+    rules_json: Optional[dict] = None
+    is_active: bool = True
 
 
 class SupplierUpdate(BaseModel):
     name: Optional[str] = None
-    code: Optional[str] = None
-    legal_name: Optional[str] = None
-    afm: Optional[str] = None
-    address: Optional[str] = None
-    country: Optional[str] = None
-    language: Optional[str] = None
-    website: Optional[str] = None
-    contact_email: Optional[str] = None
-    contact_phone: Optional[str] = None
-    contact_persons: Optional[list] = None
-    payment_terms: Optional[str] = None
-    notes: Optional[str] = None
-    supplier_type: Optional[str] = None
-    default_vat_rate: Optional[Decimal] = None
-    default_unit: Optional[str] = None
-    default_wholesale_markup: Optional[Decimal] = None
-    default_retail_markup: Optional[Decimal] = None
-    brands: Optional[list] = None
-    default_brand: Optional[str] = None
-    pylon_supplier_code: Optional[str] = None
-    code_normalization_rules: Optional[dict] = None
-    default_parser_id: Optional[UUID] = None
-    status: Optional[str] = None
+    vat_number: Optional[str] = None
+    tax_profile_json: Optional[dict] = None
+    contacts_json: Optional[dict] = None
+    default_currency: Optional[str] = None
+    default_parser: Optional[str] = None
+    rules_json: Optional[dict] = None
+    is_active: Optional[bool] = None
 
 
 class SupplierRead(BaseModel):
     id: UUID
+    company_id: UUID
     name: str
-    code: Optional[str]
-    legal_name: Optional[str]
-    afm: Optional[str]
-    aade_data: Optional[dict]
-    address: Optional[str]
-    country: str
-    language: str
-    website: Optional[str]
-    contact_email: Optional[str]
-    contact_phone: Optional[str]
-    contact_persons: Optional[list]
-    payment_terms: Optional[str]
-    notes: Optional[str]
-    supplier_type: Optional[str]
-    default_vat_rate: Decimal
-    default_unit: str
-    default_wholesale_markup: Decimal
-    default_retail_markup: Decimal
-    brands: Optional[list]
-    default_brand: Optional[str]
-    pylon_supplier_code: Optional[str]
-    status: str
-    deleted_at: Optional[datetime]
-    code_normalization_rules: Optional[dict]
-    default_parser_id: Optional[UUID]
+    vat_number: Optional[str]
+    tax_profile_json: Optional[dict]
+    contacts_json: Optional[dict]
+    default_currency: str
+    default_parser: Optional[str]
+    rules_json: Optional[dict]
+    is_active: bool
+    is_deleted: bool
     created_at: datetime
+    updated_at: datetime
 
     model_config = {"from_attributes": True}
 
 
 class SupplierListRead(BaseModel):
     id: UUID
+    company_id: UUID
     name: str
-    code: Optional[str]
-    afm: Optional[str]
-    contact_email: Optional[str]
-    default_brand: Optional[str]
-    supplier_type: Optional[str]
-    status: str
+    vat_number: Optional[str]
+    default_currency: str
+    is_active: bool
     created_at: datetime
 
     model_config = {"from_attributes": True}
 
 
 # ──────────────────────────────────────────
-# SupplierContact
+# 4. SupplierDocument
 # ──────────────────────────────────────────
-class SupplierContactCreate(BaseModel):
+class SupplierDocumentCreate(BaseModel):
     supplier_id: UUID
-    name: Optional[str] = None
-    role: Optional[str] = None
-    phone: Optional[str] = None
-    email: Optional[str] = None
+    company_id: UUID
+    doc_type: str = Field(..., pattern=r"^(agreement|catalog|price_list|other)$")
+    object_key: str
+    title: Optional[str] = Field(None, max_length=255)
+    extracted_text_object_key: Optional[str] = None
+    embedding_ref: Optional[str] = None
 
 
-class SupplierContactRead(BaseModel):
+class SupplierDocumentRead(BaseModel):
     id: UUID
     supplier_id: UUID
-    name: Optional[str]
-    role: Optional[str]
-    phone: Optional[str]
-    email: Optional[str]
+    company_id: UUID
+    doc_type: str
+    object_key: str
+    title: Optional[str]
+    extracted_text_object_key: Optional[str]
+    embedding_ref: Optional[str]
+    created_at: datetime
+    updated_at: datetime
 
     model_config = {"from_attributes": True}
 
 
 # ──────────────────────────────────────────
-# Category
+# 5. InboundFile
 # ──────────────────────────────────────────
-class CategoryCreate(BaseModel):
-    level: int = Field(..., ge=1, le=3)
-    name: str = Field(..., max_length=255)
-    parent_id: Optional[UUID] = None
-    code: Optional[str] = Field(None, max_length=50)
+class InboundFileCreate(BaseModel):
+    company_id: UUID
+    supplier_id: Optional[UUID] = None
+    file_type: str = Field(..., pattern=r"^(pdf|xml|xlsx|img)$")
+    object_key: str
+    sha256: str = Field(..., min_length=64, max_length=64)
+    original_filename: Optional[str] = Field(None, max_length=500)
+    uploaded_by: Optional[UUID] = None
 
 
-class CategoryRead(BaseModel):
+class InboundFileRead(BaseModel):
     id: UUID
-    level: int
-    name: str
-    parent_id: Optional[UUID]
-    code: Optional[str]
+    company_id: UUID
+    supplier_id: Optional[UUID]
+    file_type: str
+    object_key: str
+    sha256: str
+    original_filename: Optional[str]
+    uploaded_by: Optional[UUID]
+    uploaded_at: datetime
+    created_at: datetime
+    updated_at: datetime
 
     model_config = {"from_attributes": True}
 
 
 # ──────────────────────────────────────────
-# Product
+# 6. ParsedDocument
+# ──────────────────────────────────────────
+class ParsedDocumentCreate(BaseModel):
+    company_id: UUID
+    inbound_file_id: UUID
+    doc_kind: str = Field(..., pattern=r"^(invoice|offer|catalog|unknown)$")
+    parse_status: str = "pending"
+    parser_version: Optional[str] = Field(None, max_length=50)
+    confidence_score: Optional[Decimal] = None
+    header_json: Optional[dict] = None
+
+
+class ParsedDocumentRead(BaseModel):
+    id: UUID
+    company_id: UUID
+    inbound_file_id: UUID
+    doc_kind: str
+    parse_status: str
+    parser_version: Optional[str]
+    confidence_score: Optional[Decimal]
+    header_json: Optional[dict]
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+# ──────────────────────────────────────────
+# 7. ParsedLineItem
+# ──────────────────────────────────────────
+class ParsedLineItemCreate(BaseModel):
+    company_id: UUID
+    parsed_document_id: UUID
+    line_index: int = Field(..., ge=0)
+    supplier_sku_raw: Optional[str] = None
+    supplier_sku_normalized: Optional[str] = None
+    description_raw: Optional[str] = None
+    description_normalized: Optional[str] = None
+    qty: Optional[Decimal] = None
+    unit_price: Optional[Decimal] = None
+    line_total: Optional[Decimal] = None
+    vat_rate: Optional[Decimal] = None
+    extraction_source: str = Field(
+        ..., pattern=r"^(xml|pdf_ocr|pdf_table|manual)$"
+    )
+    extraction_notes: Optional[str] = None
+
+
+class ParsedLineItemRead(BaseModel):
+    id: UUID
+    company_id: UUID
+    parsed_document_id: UUID
+    line_index: int
+    supplier_sku_raw: Optional[str]
+    supplier_sku_normalized: Optional[str]
+    description_raw: Optional[str]
+    description_normalized: Optional[str]
+    qty: Optional[Decimal]
+    unit_price: Optional[Decimal]
+    line_total: Optional[Decimal]
+    vat_rate: Optional[Decimal]
+    extraction_source: str
+    extraction_notes: Optional[str]
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+# ──────────────────────────────────────────
+# 8. Product
 # ──────────────────────────────────────────
 class ProductCreate(BaseModel):
-    supplier_id: UUID
-    supplier_code: str = Field(..., max_length=100)
-    manufacturer_code: Optional[str] = Field(None, max_length=100)
-    ean: Optional[str] = Field(None, max_length=50)
-    description: str
-    description_normalized: Optional[str] = None
-    specs_json: Optional[dict] = None
-    internal_sku: Optional[str] = Field(None, max_length=100)
-    pylon_code: Optional[str] = Field(None, max_length=255)
-    category_k1_id: Optional[UUID] = None
-    category_k2_id: Optional[UUID] = None
-    category_k3_id: Optional[UUID] = None
-    current_price: Optional[Decimal] = None
-    price_currency: Optional[str] = Field(None, max_length=3)
-    image_url: Optional[str] = None
-    manufacturer_flag: bool = False
+    company_id: UUID
+    canonical_name: str = Field(..., max_length=500)
+    internal_code: Optional[str] = Field(None, max_length=100)
+    technical_specs_json: Optional[dict] = None
+    category_path: Optional[str] = Field(None, max_length=500)
+    status: str = "active"
 
 
 class ProductUpdate(BaseModel):
-    supplier_code: Optional[str] = None
-    manufacturer_code: Optional[str] = None
-    ean: Optional[str] = None
-    description: Optional[str] = None
-    description_normalized: Optional[str] = None
-    specs_json: Optional[dict] = None
-    internal_sku: Optional[str] = None
-    pylon_code: Optional[str] = None
-    category_k1_id: Optional[UUID] = None
-    category_k2_id: Optional[UUID] = None
-    category_k3_id: Optional[UUID] = None
-    current_price: Optional[Decimal] = None
-    price_currency: Optional[str] = None
-    image_url: Optional[str] = None
-    manufacturer_flag: Optional[bool] = None
+    canonical_name: Optional[str] = None
+    internal_code: Optional[str] = None
+    technical_specs_json: Optional[dict] = None
+    category_path: Optional[str] = None
+    status: Optional[str] = None
 
 
 class ProductRead(BaseModel):
     id: UUID
-    ergalyon_code: str
-    supplier_code: str
-    manufacturer_code: Optional[str]
-    ean: Optional[str]
-    supplier_id: UUID
-    manufacturer_id: Optional[UUID]
-    description: str
-    description_normalized: str
-    specs_json: Optional[dict] = None
-    internal_sku: Optional[str]
-    pylon_code: Optional[str]
-    category_k1_id: Optional[UUID]
-    category_k2_id: Optional[UUID]
-    category_k3_id: Optional[UUID]
-    category_confidence: Optional[Decimal]
-    current_price: Optional[Decimal]
-    price_currency: Optional[str]
-    rag_context: Optional[dict]
-    image_url: Optional[str]
-    manufacturer_flag: bool
-    data_completeness_score: Optional[int]
-    created_by: Optional[UUID]
-    updated_by: Optional[UUID]
+    company_id: UUID
+    canonical_name: str
+    internal_code: Optional[str]
+    technical_specs_json: Optional[dict]
+    category_path: Optional[str]
+    status: str
+    is_deleted: bool
     created_at: datetime
     updated_at: datetime
 
     model_config = {"from_attributes": True}
 
 
-class ProductList(BaseModel):
-    items: list[ProductRead]
-    total: int
-
-
 # ──────────────────────────────────────────
-# Invoice
+# 9. ProductSupplierLink
 # ──────────────────────────────────────────
-class InvoiceUpload(BaseModel):
+class ProductSupplierLinkCreate(BaseModel):
+    company_id: UUID
+    product_id: UUID
     supplier_id: UUID
-    document_type: str = "invoice"
+    supplier_sku_normalized: str = Field(..., max_length=255)
+    supplier_sku_raw_examples: Optional[list] = None
+    last_seen_at: Optional[datetime] = None
+    price_history_json: Optional[dict] = None
 
 
-class InvoiceRead(BaseModel):
+class ProductSupplierLinkRead(BaseModel):
     id: UUID
+    company_id: UUID
+    product_id: UUID
     supplier_id: UUID
-    document_type: str
-    invoice_number: Optional[str]
-    invoice_date: Optional[date]
-    file_path: str
-    file_format: str
+    supplier_sku_normalized: str
+    supplier_sku_raw_examples: Optional[list]
+    last_seen_at: Optional[datetime]
+    price_history_json: Optional[dict]
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+# ──────────────────────────────────────────
+# 10. MatchDecision
+# ──────────────────────────────────────────
+class MatchDecisionCreate(BaseModel):
+    company_id: UUID
+    parsed_line_item_id: UUID
+    product_id: Optional[UUID] = None
+    product_supplier_link_id: Optional[UUID] = None
+    decision_type: str = Field(
+        ..., pattern=r"^(auto_exact|auto_suggested|manual_confirm|manual_override)$"
+    )
+    candidates_json: Optional[dict] = None
+    decided_by: Optional[UUID] = None
+    decided_at: Optional[datetime] = None
+
+
+class MatchDecisionRead(BaseModel):
+    id: UUID
+    company_id: UUID
+    parsed_line_item_id: UUID
+    product_id: Optional[UUID]
+    product_supplier_link_id: Optional[UUID]
+    decision_type: str
+    candidates_json: Optional[dict]
+    decided_by: Optional[UUID]
+    decided_at: Optional[datetime]
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+# ──────────────────────────────────────────
+# 11. EnrichmentEvent
+# ──────────────────────────────────────────
+class EnrichmentEventCreate(BaseModel):
+    company_id: UUID
+    product_id: UUID
+    source_type: str = Field(
+        ..., pattern=r"^(xml|list|catalog|manual|scrape)$"
+    )
+    source_ref: Optional[str] = None
+    changes_json: Optional[dict] = None
+    applied_by: Optional[UUID] = None
+    applied_at: Optional[datetime] = None
+
+
+class EnrichmentEventRead(BaseModel):
+    id: UUID
+    company_id: UUID
+    product_id: UUID
+    source_type: str
+    source_ref: Optional[str]
+    changes_json: Optional[dict]
+    applied_by: Optional[UUID]
+    applied_at: Optional[datetime]
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+# ──────────────────────────────────────────
+# 12. ReviewTask
+# ──────────────────────────────────────────
+class ReviewTaskCreate(BaseModel):
+    company_id: UUID
+    task_type: str = Field(
+        ...,
+        pattern=r"^(parse_fix|match_confirm|enrichment_confirm|export_validate)$",
+    )
+    entity_ref: Optional[str] = Field(None, max_length=255)
+    status: str = "open"
+    assigned_to: Optional[UUID] = None
+    priority: str = "MEDIUM"
+    payload_json: Optional[dict] = None
+    resolution: Optional[str] = None
+
+
+class ReviewTaskUpdate(BaseModel):
+    status: Optional[str] = None
+    assigned_to: Optional[UUID] = None
+    priority: Optional[str] = None
+    payload_json: Optional[dict] = None
+    resolution: Optional[str] = None
+    resolved_by: Optional[UUID] = None
+    resolved_at: Optional[datetime] = None
+    closed_at: Optional[datetime] = None
+
+
+class ReviewTaskRead(BaseModel):
+    id: UUID
+    company_id: UUID
+    task_type: str
+    entity_ref: Optional[str]
     status: str
-    parsed_data_json: Optional[dict]
-    parsing_confidence: Optional[Decimal]
-    total_amount: Optional[Decimal]
-    currency: str
-    error_message: Optional[str]
-    processed_at: Optional[datetime]
-    created_by: Optional[UUID]
-    created_at: datetime
-
-    model_config = {"from_attributes": True}
-
-
-class InvoiceItemRead(BaseModel):
-    id: UUID
-    invoice_id: UUID
-    product_id: Optional[UUID]
-    line_number: Optional[int]
-    raw_supplier_code: Optional[str]
-    normalized_supplier_code: Optional[str]
-    raw_description: str
-    quantity: Optional[Decimal]
-    unit_price: Optional[Decimal]
-    line_total: Optional[Decimal]
-    vat_rate: Optional[Decimal]
-    matched_product_id: Optional[UUID]
-    match_method: Optional[str]
-    match_confidence: Optional[Decimal]
-    manufacturer_code: Optional[str]
-    status: Optional[str]
-    created_at: datetime
-
-    model_config = {"from_attributes": True}
-
-
-# ──────────────────────────────────────────
-# Review Queue
-# ──────────────────────────────────────────
-class ReviewQueueRead(BaseModel):
-    id: UUID
-    product_id: Optional[UUID]
-    invoice_item_id: Optional[UUID]
-    review_type: str
+    assigned_to: Optional[UUID]
     priority: str
-    status: str
     payload_json: Optional[dict]
-    prompt_text: Optional[str]
     resolution: Optional[str]
     resolved_by: Optional[UUID]
     resolved_at: Optional[datetime]
-    created_at: datetime
-
-    model_config = {"from_attributes": True}
-
-
-class ReviewResolve(BaseModel):
-    resolution: str = Field(..., pattern="^(approved|edited|rejected)$")
-    data: Optional[dict] = None
-    resolved_by: Optional[UUID] = None
-
-
-class ReviewQueueList(BaseModel):
-    total: int
-    items: list[ReviewQueueRead]
-
-
-# ──────────────────────────────────────────
-# Export
-# ──────────────────────────────────────────
-class ExportRequest(BaseModel):
-    format: str = Field("xlsx", pattern="^(csv|xlsx|json|xml)$")
-    supplier_id: Optional[UUID] = None
-    category_k1_id: Optional[UUID] = None
-    date_from: Optional[date] = None
-    date_to: Optional[date] = None
-    export_type: str = Field("products", pattern="^(products|invoices)$")
-
-
-class ExportLogRead(BaseModel):
-    id: UUID
-    export_type: str
-    file_format: str
-    file_path: Optional[str]
-    status: str
-    total_rows: Optional[int]
-    error_message: Optional[str]
-    created_at: datetime
-
-    model_config = {"from_attributes": True}
-
-
-# ──────────────────────────────────────────
-# Supplier Agreement
-# ──────────────────────────────────────────
-class SupplierAgreementCreate(BaseModel):
-    supplier_id: UUID
-    title: Optional[str] = Field(None, max_length=255)
-    valid_from: Optional[date] = None
-    valid_to: Optional[date] = None
-
-
-class SupplierAgreementRead(BaseModel):
-    id: UUID
-    supplier_id: UUID
-    title: Optional[str]
-    file_path: str
-    valid_from: Optional[date]
-    valid_to: Optional[date]
-    rag_index_id: Optional[str]
-    indexed_at: Optional[datetime]
-    organization_id: Optional[UUID]
+    closed_at: Optional[datetime]
     created_at: datetime
     updated_at: datetime
 
     model_config = {"from_attributes": True}
 
 
-class SupplierAgreementSearch(BaseModel):
-    query: str
-    supplier_id: Optional[UUID] = None
-    limit: int = 5
-
-
 # ──────────────────────────────────────────
-# Enrichment Queue
+# 13. CostUpdate
 # ──────────────────────────────────────────
-class EnrichRequest(BaseModel):
-    sources: List[str] = Field(
-        default=["xml", "pdf", "image", "excel", "catalog", "scraping"]
-    )
-
-
-class EnrichmentQueueRead(BaseModel):
-    id: UUID
+class CostUpdateCreate(BaseModel):
+    company_id: UUID
     product_id: UUID
+    product_supplier_link_id: Optional[UUID] = None
+    old_cost: Optional[Decimal] = None
+    new_cost: Optional[Decimal] = None
+    source: str = Field(..., pattern=r"^(invoice|catalog|scrape|manual)$")
+    source_ref: Optional[str] = None
+    status: str = "pending"
+    approved_by: Optional[UUID] = None
+    approved_at: Optional[datetime] = None
+
+
+class CostUpdateRead(BaseModel):
+    id: UUID
+    company_id: UUID
+    product_id: UUID
+    product_supplier_link_id: Optional[UUID]
+    old_cost: Optional[Decimal]
+    new_cost: Optional[Decimal]
+    source: str
+    source_ref: Optional[str]
     status: str
-    enrichment_level: str
-    source: Optional[str]
-    priority: int
-    payload: Optional[dict]
-    result: Optional[dict]
-    error_message: Optional[str]
-    started_at: Optional[datetime]
-    completed_at: Optional[datetime]
+    approved_by: Optional[UUID]
+    approved_at: Optional[datetime]
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+# ──────────────────────────────────────────
+# 14. AuditLog
+# ──────────────────────────────────────────
+class AuditLogCreate(BaseModel):
+    company_id: UUID
+    entity_type: str = Field(..., max_length=50)
+    entity_id: UUID
+    action: str = Field(
+        ..., pattern=r"^(create|update|delete|match|enrich|export)$"
+    )
+    payload_json: Optional[dict] = None
+    user_id: Optional[UUID] = None
+
+
+class AuditLogRead(BaseModel):
+    id: UUID
+    company_id: UUID
+    entity_type: str
+    entity_id: UUID
+    action: str
+    payload_json: Optional[dict]
+    user_id: Optional[UUID]
     created_at: datetime
 
     model_config = {"from_attributes": True}
 
 
 # ──────────────────────────────────────────
-# Parser Config
+# 15. ExportJob
 # ──────────────────────────────────────────
-class ParserConfigRead(BaseModel):
+class ExportJobCreate(BaseModel):
+    company_id: UUID
+    export_type: str = Field(..., max_length=50)
+    export_version: Optional[str] = Field(None, max_length=20)
+    file_format: str = Field(..., pattern=r"^(csv|xlsx|json|xml)$")
+    object_key: Optional[str] = None
+    status: str = "pending"
+    total_rows: Optional[int] = None
+    error_message: Optional[str] = None
+    requested_by: Optional[UUID] = None
+
+
+class ExportJobUpdate(BaseModel):
+    status: Optional[str] = None
+    object_key: Optional[str] = None
+    total_rows: Optional[int] = None
+    error_message: Optional[str] = None
+    completed_at: Optional[datetime] = None
+
+
+class ExportJobRead(BaseModel):
     id: UUID
-    name: str
-    parser_type: str
-    config_json: dict
-    is_active: bool
+    company_id: UUID
+    export_type: str
+    export_version: Optional[str]
+    file_format: str
+    object_key: Optional[str]
+    status: str
+    total_rows: Optional[int]
+    error_message: Optional[str]
+    requested_by: Optional[UUID]
+    completed_at: Optional[datetime]
+    created_at: datetime
+    updated_at: datetime
 
     model_config = {"from_attributes": True}
 
 
 # ──────────────────────────────────────────
-# Generic
+# Generic / Shared
 # ──────────────────────────────────────────
 class PaginationParams(BaseModel):
     limit: int = Field(default=20, ge=1, le=100)
@@ -468,18 +537,20 @@ class PaginationParams(BaseModel):
 
 
 class PaginatedResponse(BaseModel):
-    items: list
+    items: list[Any]
     total: int
     limit: int
     offset: int
 
 
 class ErrorResponse(BaseModel):
-    error: dict = Field(default_factory=lambda: {
-        "code": "INTERNAL_ERROR",
-        "message": "An unexpected error occurred",
-        "request_id": None,
-    })
+    error: dict = Field(
+        default_factory=lambda: {
+            "code": "INTERNAL_ERROR",
+            "message": "An unexpected error occurred",
+            "request_id": None,
+        }
+    )
 
 
 class HealthResponse(BaseModel):
