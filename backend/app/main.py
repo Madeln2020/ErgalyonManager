@@ -101,17 +101,15 @@ async def health_check():
     }
 
 
-# ── Router placeholders (registered as they are implemented) ───────
-# Each router is imported and included here.  Routers that are not
-# yet created simply won't exist — FastAPI ignores missing modules.
-# Uncomment / add routers as they become available:
-#
-# from app.routers import suppliers, products, catalogs, auth, health
-# app.include_router(suppliers.router)
-# app.include_router(products.router)
-# app.include_router(catalogs.router)
-# app.include_router(auth.router)
-# app.include_router(health.router)
+# ── Router registration ───────────────────────────────────────────────
+# Register all routers as they are implemented
+from app.routers import suppliers, products, catalogs, auth, health
+
+app.include_router(suppliers.router)
+app.include_router(products.router)
+app.include_router(catalogs.router)
+app.include_router(auth.router)
+app.include_router(health.router)
 
 
 # ── Global exception handler ───────────────────────────────────────

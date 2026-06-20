@@ -45,7 +45,7 @@ class UserCreate(BaseModel):
     company_id: UUID
     email: str = Field(..., max_length=255)
     password_hash: str = Field(..., max_length=255)
-    role: str = Field(..., pattern=r"^(admin|operator|viewer)$")
+    role: str = Field(..., pattern=r"^(viewer|user|admin|owner)$")
     display_name: Optional[str] = Field(None, max_length=255)
     is_active: bool = True
 

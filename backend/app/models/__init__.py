@@ -105,7 +105,7 @@ class User(Base, TimestampMixin, SoftDeleteMixin):
     password_hash: Mapped[str] = mapped_column(VARCHAR(255), nullable=False)
     role: Mapped[str] = mapped_column(
         VARCHAR(20),
-        CheckConstraint("role IN ('admin','operator','viewer')"),
+        CheckConstraint("role IN ('viewer','user','admin','owner')"),
         nullable=False,
     )
     display_name: Mapped[Optional[str]] = mapped_column(VARCHAR(255))
@@ -158,6 +158,7 @@ class Supplier(Base, TimestampMixin, SoftDeleteMixin):
     )
 
     __table_args__ = (
+        UniqueConstraint("company_id", "vat_number", name="uq_company_vat"),
         Index("idx_suppliers_company", "company_id"),
         Index("idx_suppliers_vat", "vat_number"),
     )

@@ -1,6 +1,8 @@
-# EDM v2 — Auth Router: Register, Login
+# EDM v2.1 — Auth Router: Login, Register, Me
+# Works with Company/User models (multi-tenant)
 
 from datetime import datetime, timezone
+from typing import Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -8,72 +10,21 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.models import Organization, User
-from app.schemas import (
-    LoginRequest,
-    RegisterRequest,
-    TokenResponse,
-    UserRead,
-)
-from app.auth import (
-    create_access_token,
-    get_current_user,
-    hash_password,
-    verify_password,
-)
+from app.models import Company, User
+from app.schemas.auth import LoginRequest, RegisterRequest, TokenResponse
+from app.schemas import UserRead
+from app.auth import create_access_token, get_current_user, hash_password, verify_password
+from app.config import settings
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
-
-_DEFAULT_ORG_ID = UUID("00000000-0000-0000-0000-000000000001")
-
-
-@router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
-async def register(data: RegisterRequest, db: AsyncSession = Depends(get_db)):
-    """Register a new user with a new organization."""
-    # Check if email already exists
-    existing = await db.execute(select(User).where(User.email == data.email))
-    if existing.scalar_one_or_none():
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Email already registered",
-        )
-
-    # Use default organization (single-tenant for now)
-    org_result = await db.execute(select(Organization).where(Organization.id == _DEFAULT_ORG_ID))
-    org = org_result.scalar_one_or_none()
-    if not org:
-        org = Organization(
-            id=_DEFAULT_ORG_ID,
-            name=data.organization_name,
-        )
-        db.add(org)
-        await db.flush()
-
-    # Create user
-    user = User(
-        email=data.email,
-        password_hash=hash_password(data.password),
-        display_name=data.display_name,
-        organization_id=org.id,
-        role="OWNER",
-    )
-    db.add(user)
-    await db.flush()
-    await db.refresh(user)
-
-    # Generate token
-    access_token = create_access_token(data={"sub": str(user.id)})
-
-    return TokenResponse(
-        access_token=access_token,
-        user=UserRead.model_validate(user),
-    )
 
 
 @router.post("/login", response_model=TokenResponse)
 async def login(data: LoginRequest, db: AsyncSession = Depends(get_db)):
     """Authenticate user and return JWT token."""
-    result = await db.execute(select(User).where(User.email == data.email, User.is_active == True))
+    result = await db.execute(
+        select(User).where(User.email == data.email, User.is_active == True)
+    )
     user = result.scalar_one_or_none()
 
     if not user or not verify_password(data.password, user.password_hash):
@@ -90,7 +41,46 @@ async def login(data: LoginRequest, db: AsyncSession = Depends(get_db)):
 
     return TokenResponse(
         access_token=access_token,
-        user=UserRead.model_validate(user),
+        expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        user=UserRead.model_validate(user).model_dump(mode="json"),
+    )
+
+
+@router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
+async def register(data: RegisterRequest, db: AsyncSession = Depends(get_db)):
+    """Register a new user with a new company."""
+    # Check if email already exists
+    existing = await db.execute(select(User).where(User.email == data.email))
+    if existing.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Email already registered",
+        )
+
+    # Create company
+    company = Company(name=data.company_name)
+    db.add(company)
+    await db.flush()
+
+    # Create user (OWNER role for first user)
+    user = User(
+        company_id=company.id,
+        email=data.email,
+        password_hash=hash_password(data.password),
+        display_name=data.display_name,
+        role="OWNER",
+        is_active=True,
+    )
+    db.add(user)
+    await db.flush()
+    await db.refresh(user)
+
+    access_token = create_access_token(data={"sub": str(user.id)})
+
+    return TokenResponse(
+        access_token=access_token,
+        expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        user=UserRead.model_validate(user).model_dump(mode="json"),
     )
 
 
