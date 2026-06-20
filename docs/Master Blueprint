@@ -1,0 +1,742 @@
+ERGALYON INVOICE MANAGER v2 — MASTER BLUEPRINT
+Document Control
+Version: 2.0-FINAL
+Date: 2026-06-19
+Author: System Architect (Kimi) → Implementation Agent (Hermes)
+Status: LOCKED FOR IMPLEMENTATION
+Purpose: This document is the single source of truth. Any deviation requires explicit written approval.
+1. Project Identity & Scope Lock
+1.1 Purpose
+
+Ergalyon v2 is a dedicated Invoice and Offer Processing System for B2B tool and consumable wholesalers. It ingests supplier invoices/offers, extracts product and pricing data, matches them to internal product identities, enriches them with technical characteristics, and exports structured data to update internal cost prices.
+
+1.2 In-Scope (MUST)
+Upload and parsing of Invoices (PDF, scanned image, Excel/XML) from suppliers.
+Upload and parsing of Offers (PDF, scanned image, Excel/XML) from suppliers.
+Supplier Management: Full CRUD, soft-delete, complete supplier card (AADE data, contacts, agreements).
+Product Management: Internal product identity management (independent of supplier codes).
+Intelligent Parsing: Multi-layered extraction (Hardcoded Parsers → Dynamic Parsers → AI Vision/OCR).
+Normalization: Supplier-specific code transformations (e.g., Poimenidis 03- stripping).
+Cost Price Update: Updating product cost based on parsed invoice data, with user-controlled overwrite.
+Enrichment (5 Levels):
+Invoice XML/embedded data.
+Supplier Catalog files (manually uploaded).
+Supplier Product Lists (manually uploaded).
+Manual entry/correction by user.
+Web Scraping (last resort) via Crawl4AI for images, descriptions, barcodes.
+Export: Generation of XLSX files compatible with Pylon ERP (Import/Update modes).
+Multi-tenancy: Full data isolation between organizations/companies.
+Audit & History: Complete logs of who changed what and when.
+1.3 Out-of-Scope (NEVER)
+Supplier Agreement Comparison: The system will NOT compare uploaded supplier agreements with invoice data to validate terms. Agreements are for archival and chat search ONLY.
+Pylon Code Matching: The system will NOT use the internal Pylon ERP code (PYLONCODE) during the product matching phase. Matching is based on Supplier Code, Manufacturer Code, Barcode, and Description.
+ERP Write-Back Integration: The system generates an XLSX file. It does NOT push data directly into Pylon ERP via API.
+E-shop Functions: No connection to the Magento 2 e-shop project.
+Dispute/Compliance Engine: No automated flagging of invoice discrepancies against agreements.
+Email Drafting: No AI-generated emails to suppliers.
+1.4 Target User
+Primary: Purchasing managers and accountants in tool/consumable wholesale companies.
+Language: Greek (el-GR) only. No multi-language support.
+2. Functional Modules & CRUD Specifications
+2.1 Module: Organization & Multi-Tenancy
+Data Isolation: Every table MUST have an organization_id column. All queries MUST be filtered by the authenticated user's organization_id.
+User Roles:
+OWNER: Full access, can manage users, delete organization data.
+ADMIN: Can manage suppliers, products, invoices, and export. Cannot delete organization.
+USER: Can upload invoices, review data, and export. Cannot delete suppliers/products.
+VIEWER: Read-only access to invoices and products.
+2.2 Module: Supplier Management
+2.2.1 Supplier Master Data (Full Card)
+Supplier ID (UUID, PK)
+Organization ID (FK)
+Display Name (e.g., "Ποιμενίδης ΑΕ")
+Legal Name
+AADE Tax ID (ΑΦΜ) — Unique per organization.
+AADE Data (cached JSON): DOY, address, registration status, activity codes. Auto-populated via AADE API on creation.
+Contact Information: Phones, emails, website URL.
+Contact Persons (1:N): Name, role, phone, email.
+Payment Terms: Text field (e.g., "60 days").
+Notes: Free text.
+Status: ACTIVE, INACTIVE, BLACKLISTED.
+Created At / Updated At
+Soft Delete: deleted_at (timestamp). When set, supplier is hidden from default views but historical invoices remain linked and visible.
+2.2.2 Supplier Agreement (Archive)
+Agreement ID (UUID)
+Supplier ID (FK)
+File Upload: PDF/Word/Excel.
+File Name, File Size, MIME Type
+Upload Date, Uploaded By
+RAG Status: INDEXED, PENDING, ERROR
+Function: FULL TEXT SEARCH & CHAT ONLY. No business rule enforcement.
+2.2.3 Supplier-Specific Configuration
+Code Normalization Rules: JSON config for regex transformations.
+Example (Poimenidis): { "type": "strip_prefix", "pattern": "^03-", "description": "Remove 03- prefix to get manufacturer code" }
+Default Parser ID: Link to the parser configuration used for this supplier.
+2.3 Module: Product Management
+2.3.1 Product Master Data
+Product ID (UUID, PK)
+Organization ID (FK)
+Internal SKU (optional, user-defined)
+Product Name (Canonical name, e.g., "Γωνιακός Τροχός Milwaukee M18")
+Description (Long text)
+Category (Text, e.g., "Ηλεκτρικά Εργαλεία > Γωνιακοί Τροχοί")
+Manufacturer (e.g., "Milwaukee")
+Base Barcode (EAN/UPN)
+Technical Specifications (JSONB)
+Status: ACTIVE, DISCONTINUED, PENDING_REVIEW
+Created At / Updated At / Deleted At (Soft Delete)
+Audit Log: Who created/updated/deleted and when.
+2.3.2 Product-Supplier Link (Critical Junction Table)
+Link ID (UUID)
+Product ID (FK)
+Supplier ID (FK)
+Supplier Code (The code THIS supplier uses for this product)
+Manufacturer Code (The code the MANUFACTURER uses, if different)
+Last Confirmed Date: When was this link last verified by an invoice?
+Confidence: CERTAIN (from barcode), HIGH (exact code match), MEDIUM (normalized match), LOW (fuzzy/partial), MANUAL (user set).
+Is Primary: Boolean. If multiple suppliers sell the same product, which link is the default?
+2.3.3 Product Cost History
+History ID (UUID)
+Product ID (FK)
+Supplier ID (FK)
+Invoice ID (FK — where this cost came from)
+Unit Cost (Decimal, exact)
+Currency: Default EUR.
+Date Recorded
+Recorded By: User or SYSTEM.
+2.4 Module: Invoice / Offer Management
+2.4.1 Invoice Header
+Invoice ID (UUID)
+Organization ID (FK)
+Supplier ID (FK)
+Document Type: INVOICE, OFFER, CREDIT_NOTE
+Document Number: As written on the PDF (String).
+Issue Date (Date)
+Upload Date
+Total Amount (Decimal)
+Total VAT (Decimal)
+Currency
+File Path: Reference to stored PDF/image.
+Raw Text: Extracted full text from OCR.
+Processing Status:
+UPLOADED
+PARSING
+EXTRACTED (AI/Parser found table)
+MATCHING (Matching to products)
+REVIEW_REQUIRED
+APPROVED
+EXPORTED
+Parser Used: Which parser extracted the data.
+Error Log: If parsing fails, store error details.
+2.4.2 Invoice Line Items
+Item ID (UUID)
+Invoice ID (FK)
+Line Number: Integer (1, 2, 3...)
+Raw Description: Text as extracted from invoice.
+Supplier Code: Code found on invoice.
+Normalized Supplier Code: After applying supplier rules (e.g., stripped 03-).
+Manufacturer Code: If identifiable separately.
+Barcode: If found.
+Quantity (Decimal)
+Unit of Measure: PIECES, KG, METERS, etc.
+Unit Price (Decimal)
+Line Total (Decimal)
+VAT Rate (Decimal)
+Matched Product ID: Nullable. Link to products table if matched.
+Match Method: BARCODE, EXACT_CODE, NORMALIZED_CODE, FUZZY, MANUAL, NONE
+Match Confidence: 0.0 to 1.0
+Status: PENDING, MATCHED, NEW_PRODUCT, MANUAL_REVIEW
+2.5 Module: Enrichment Management
+2.5.1 Enrichment Queue
+Queue ID (UUID)
+Product ID (FK)
+Missing Fields: JSON array (e.g., ["image", "barcode", "specs"])
+Priority: Integer (higher = more urgent)
+Source Requested: CATALOG, SCRAPING, MANUAL
+2.5.2 Enrichment Sources (Precedence Engine)
+
+The system MUST respect the following hierarchy when filling a product's fields:
+
+XML / Embedded Data (from invoice): Highest trust for codes/prices.
+Supplier Catalog (manually uploaded Excel/PDF by user): High trust for descriptions/specs.
+Supplier Product List (manually uploaded by user): Medium trust.
+Manual Entry: User types data directly. Overrides AI/Scraping.
+Web Scraping (Crawl4AI): Lowest trust. Used ONLY if 1-4 are missing. Must be flagged as SCRAPED.
+2.6 Module: Export Management
+Export Job ID (UUID)
+Organization ID (FK)
+Type: IMPORT (new products to Pylon), UPDATE (cost prices for existing products)
+Filters: Date range, supplier, product category.
+Status: PENDING, PROCESSING, READY, DOWNLOADED
+File Path: Generated XLSX.
+Record Count
+Requested By / Requested At
+2.7 Module: Audit & Logging
+Audit Log ID (UUID)
+Organization ID (FK)
+Table Name: products, suppliers, invoices, etc.
+Record ID: UUID of the affected record.
+Action: CREATE, UPDATE, DELETE, SOFT_DELETE, RESTORE, EXPORT, LOGIN, MATCH_OVERRIDE
+User ID: Who did it.
+Old Values: JSON
+New Values: JSON
+Timestamp
+IP Address
+3. End-to-End Functional Flow (11 Steps)
+Step 1: Supplier Onboarding
+User navigates to "Suppliers" → "New Supplier".
+Enters AADE Tax ID (ΑΦΜ).
+System calls AADE API, auto-fills: Legal Name, DOY, Address, Status.
+User adds: Display Name, Contacts, Phones, Emails.
+User uploads Supplier Agreement (PDF). System stores it and indexes it for RAG search.
+User uploads Supplier Catalog (Excel/PDF) and/or Product List (Excel).
+System parses Catalog/Product List to pre-populate products and product_supplier_links.
+User sets Code Normalization Rules (e.g., for Poimenidis, define the 03- stripping rule).
+Step 2: Invoice / Offer Upload
+User goes to "Invoices" → "Upload".
+Selects Supplier from dropdown (or system auto-detects from document).
+Selects Document Type: INVOICE or OFFER.
+Uploads file: PDF, Image (PNG/JPG), or Excel/XML.
+System stores file and creates Invoice record with status UPLOADED.
+Step 3: Document Ingestion & Text Extraction
+If PDF with text layer: Extract text using pdftotext -layout.
+If scanned PDF/Image: Convert to PNG (pdftoppm -r 300), OCR with Tesseract (-l ell+eng, PSM 6).
+If Excel/XML: Parse directly with SheetJS / XML parser.
+Store extracted raw text in invoices.raw_text.
+Step 4: Structured Data Extraction (The 3-Level Parser)
+
+Goal: Turn raw text into a table of items (Code, Description, Qty, Price).
+
+Level 1 — Hardcoded Parser:
+
+System checks if Supplier has a dedicated TypeScript parser (e.g., poimenidis_parser.ts).
+If canParse(rawText) returns true, execute parse(rawText) → return items.
+If success, jump to Step 5.
+
+Level 2 — Dynamic Regex Parser:
+
+If no hardcoded parser exists, load parser_configs for this supplier.
+Apply regex patterns stored in DB to extract table rows.
+If confidence > threshold, return items.
+
+Level 3 — AI Parser Generation:
+
+If Level 1 & 2 fail, send sample PDF + raw text to LLM (Claude Sonnet via Abacus AI or Llama 70B).
+Prompt: "Analyze this invoice and output a JSON array of items with keys: supplier_code, description, quantity, unit_price, line_total."
+LLM returns JSON. System stores this as a new parser_config for future use (Learning).
+If AI fails, set status to REVIEW_REQUIRED and alert user.
+Step 5: Data Normalization
+For each extracted line item, apply the Supplier's Normalization Rules.
+Example (Poimenidis): supplier_code = "03-DCD996" → normalized_code = "DCD996".
+Clean descriptions (remove extra spaces, standardize units).
+Detect Barcodes (13-digit numbers) if present in description or separate column.
+Step 6: Product Matching (The 4 Levels — NO PYLON CODE)
+
+Goal: Link the invoice line item to an existing product via product_supplier_links.
+
+Matching Hierarchy:
+
+Barcode Match: If invoice_item.barcode matches product.base_barcode or product_supplier_link.supplier_code (if supplier code IS barcode). Confidence = 1.0.
+Exact Code Match: invoice_item.normalized_supplier_code == product_supplier_link.supplier_code. Confidence = 1.0.
+Normalized/Manufacturer Code Match: invoice_item.normalized_supplier_code == product_supplier_link.manufacturer_code. Confidence = 0.95.
+Fuzzy/Partial Match: If description similarity > 0.85 (using embeddings or Levenshtein). Confidence = 0.7. Requires human approval.
+
+Rules:
+
+If match found, populate invoice_item.matched_product_id and set status MATCHED.
+If NO match found, set status NEW_PRODUCT.
+CRITICAL: PYLONCODE is NEVER used in this matching logic. It only appears in the Export phase.
+Step 7: Product Creation (For NEW_PRODUCT items)
+System shows user a "New Products Detected" screen.
+For each unmatched item, system pre-fills:
+Product Name: From invoice description (cleaned).
+Supplier Code: invoice_item.normalized_supplier_code.
+Manufacturer Code: invoice_item.normalized_supplier_code (if stripping rule applies).
+Cost Price: invoice_item.unit_price.
+Supplier: invoice.supplier_id.
+User reviews and clicks Create Product.
+System inserts into products table and product_supplier_links.
+System updates invoice_item status to MATCHED.
+Step 8: Cost Price Update
+For all MATCHED items, system compares invoice_item.unit_price with product_supplier_links current cost.
+Rule: The system DOES NOT automatically overwrite the master cost price.
+Instead, it shows a "Pending Updates" list:
+Product Name | Old Cost | New Cost (from invoice) | Supplier | Invoice Date
+User reviews and clicks Apply Selected Updates.
+System updates product_supplier_links cost, inserts record into product_cost_history, and logs action in audit_logs.
+Step 9: Enrichment (The 5 Waves)
+
+Trigger: After product creation or matching, system checks which fields are missing (image, barcode, full description, technical specs).
+
+Wave 1 — Invoice XML/Embedded:
+
+If invoice was XML, extract <ExtraData> or embedded product attributes. Store directly.
+
+Wave 2 — Supplier Catalog / Product List:
+
+Search uploaded Catalog/Product List files for the supplier_code or manufacturer_code.
+If found, extract description, specs, images (if URLs). Store in product.
+
+Wave 3 — Manual Enrichment:
+
+User clicks "Enrich Product" and manually types/pastes data.
+This data is marked as source: MANUAL and has highest precedence.
+
+Wave 4 — AI-Assisted Parsing (from uploaded files):
+
+If user uploads a product brochure PDF, AI (Vision) extracts specs and tables.
+User reviews AI extraction before saving.
+
+Wave 5 — Web Scraping (Last Resort):
+
+If fields are still missing, system queues job for Crawl4AI.
+Crawl4AI searches supplier website or Google for the manufacturer_code + manufacturer_name.
+Scrapes images, descriptions, barcodes from 50+ e-shops.
+Stores results with source: SCRAPED and confidence: LOW.
+User must review and approve scraped data before it becomes "official".
+Step 10: Human Review & Approval
+Dashboard shows all invoices with status REVIEW_REQUIRED or MATCHED.
+User clicks an invoice to see:
+Extracted table side-by-side with matched product cards.
+Yellow flags for low-confidence matches.
+Red flags for NEW_PRODUCT items.
+User can:
+Drag-and-drop to re-match a line item to a different product.
+Edit extracted values (price, quantity).
+Approve the entire invoice.
+Once approved, status changes to APPROVED. Cost updates (Step 8) can now be applied.
+Step 11: Export to Pylon ERP
+User navigates to "Export" → "New Export Job".
+Selects:
+Date Range (e.g., "Invoices from June 2026")
+Supplier (optional)
+Export Type: IMPORT (for new products) or UPDATE (for cost changes)
+System generates XLSX:
+IMPORT columns: ΠΕΡΙΓΡΑΦΗ, ΚΩΔΙΚΟΣ ΠΡΟΜΗΘΕΥΤΗ, ΚΩΔΙΚΟΣ ΚΑΤΑΣΚΕΥΑΣΤΗ, BARCODE, ΤΙΜΗ ΑΓΟΡΑΣ, ΦΠΑ, ΚΑΤΗΓΟΡΙΑ, ΚΑΤΑΣΚΕΥΑΣΤΗΣ.
+UPDATE columns: PYLONCODE (if known), ΚΩΔΙΚΟΣ ΠΡΟΜΗΘΕΥΤΗ, ΝΕΑ ΤΙΜΗ ΑΓΟΡΑΣ, ΗΜΕΡΟΜΗΝΙΑ ΤΙΜΟΛΟΓΙΟΥ.
+System auto-detects if a product has a PYLONCODE in the products table. If yes, it suggests UPDATE mode. If no, IMPORT mode.
+User downloads XLSX and imports manually into Pylon ERP.
+System logs export in export_logs and updates invoice status to EXPORTED.
+4. Data Model (Logical Schema)
+4.1 organizations
+Column	Type	Constraints
+id	UUID	PK
+name	VARCHAR(255)	NOT NULL
+aade_afm	VARCHAR(20)	Unique
+address	TEXT	
+created_at	TIMESTAMP	DEFAULT now()
+settings	JSONB	{ currency, default_vat }
+4.2 users
+Column	Type	Constraints
+id	UUID	PK
+organization_id	UUID	FK → organizations
+email	VARCHAR(255)	NOT NULL, Unique per org
+password_hash	VARCHAR(255)	bcrypt
+role	ENUM	OWNER, ADMIN, USER, VIEWER
+display_name	VARCHAR(255)	
+last_login	TIMESTAMP	
+created_at	TIMESTAMP	DEFAULT now()
+4.3 suppliers
+Column	Type	Constraints
+id	UUID	PK
+organization_id	UUID	FK → organizations
+display_name	VARCHAR(255)	NOT NULL
+legal_name	VARCHAR(255)	
+aade_afm	VARCHAR(20)	NOT NULL, Unique per org
+aade_data	JSONB	{ doy, address, status }
+phones	JSONB	["2310...", "..."]
+emails	JSONB	["info@..."]
+website	VARCHAR(255)	
+payment_terms	TEXT	
+notes	TEXT	
+status	ENUM	ACTIVE, INACTIVE, BLACKLISTED
+code_normalization_rules	JSONB	[{ type, pattern, description }]
+default_parser_id	UUID	FK → parser_configs
+created_at	TIMESTAMP	DEFAULT now()
+updated_at	TIMESTAMP	
+deleted_at	TIMESTAMP	NULLABLE (Soft Delete)
+4.4 supplier_agreements
+Column	Type	Constraints
+id	UUID	PK
+supplier_id	UUID	FK → suppliers
+file_name	VARCHAR(255)	
+file_path	VARCHAR(500)	
+file_size	INT	
+mime_type	VARCHAR(100)	
+uploaded_by	UUID	FK → users
+upload_date	TIMESTAMP	DEFAULT now()
+rag_status	ENUM	PENDING, INDEXED, ERROR
+4.5 supplier_contacts
+Column	Type	Constraints
+id	UUID	PK
+supplier_id	UUID	FK → suppliers
+name	VARCHAR(255)	
+role	VARCHAR(255)	
+phone	VARCHAR(50)	
+email	VARCHAR(255)	
+4.6 products
+Column	Type	Constraints
+id	UUID	PK
+organization_id	UUID	FK → organizations
+internal_sku	VARCHAR(255)	
+name	VARCHAR(500)	NOT NULL
+description	TEXT	
+category	VARCHAR(500)	
+manufacturer	VARCHAR(255)	
+base_barcode	VARCHAR(50)	
+technical_specs	JSONB	
+status	ENUM	ACTIVE, DISCONTINUED, PENDING_REVIEW
+pylon_code	VARCHAR(255)	Nullable. ONLY for export.
+created_at	TIMESTAMP	DEFAULT now()
+updated_at	TIMESTAMP	
+deleted_at	TIMESTAMP	NULLABLE (Soft Delete)
+4.7 product_supplier_links
+Column	Type	Constraints
+id	UUID	PK
+product_id	UUID	FK → products
+supplier_id	UUID	FK → suppliers
+supplier_code	VARCHAR(255)	NOT NULL
+manufacturer_code	VARCHAR(255)	
+last_confirmed_date	DATE	
+confidence	ENUM	CERTAIN, HIGH, MEDIUM, LOW, MANUAL
+is_primary	BOOLEAN	DEFAULT false
+current_cost	DECIMAL(12,4)	
+cost_currency	VARCHAR(3)	DEFAULT 'EUR'
+4.8 product_cost_history
+Column	Type	Constraints
+id	UUID	PK
+product_id	UUID	FK → products
+supplier_id	UUID	FK → suppliers
+invoice_id	UUID	FK → invoices
+unit_cost	DECIMAL(12,4)	NOT NULL
+currency	VARCHAR(3)	DEFAULT 'EUR'
+recorded_at	TIMESTAMP	DEFAULT now()
+recorded_by	UUID	FK → users
+4.9 invoices
+Column	Type	Constraints
+id	UUID	PK
+organization_id	UUID	FK → organizations
+supplier_id	UUID	FK → suppliers
+document_type	ENUM	INVOICE, OFFER, CREDIT_NOTE
+document_number	VARCHAR(255)	
+issue_date	DATE	
+upload_date	TIMESTAMP	DEFAULT now()
+total_amount	DECIMAL(12,4)	
+total_vat	DECIMAL(12,4)	
+currency	VARCHAR(3)	DEFAULT 'EUR'
+file_path	VARCHAR(500)	
+raw_text	TEXT	
+processing_status	ENUM	UPLOADED, PARSING, EXTRACTED, MATCHING, REVIEW_REQUIRED, APPROVED, EXPORTED
+parser_used	VARCHAR(255)	
+error_log	TEXT	
+created_by	UUID	FK → users
+4.10 invoice_items
+Column	Type	Constraints
+id	UUID	PK
+invoice_id	UUID	FK → invoices
+line_number	INT	
+raw_description	TEXT	
+supplier_code	VARCHAR(255)	
+normalized_supplier_code	VARCHAR(255)	
+manufacturer_code	VARCHAR(255)	
+barcode	VARCHAR(50)	
+quantity	DECIMAL(12,4)	
+unit_of_measure	VARCHAR(50)	
+unit_price	DECIMAL(12,4)	
+line_total	DECIMAL(12,4)	
+vat_rate	DECIMAL(5,2)	
+matched_product_id	UUID	FK → products
+match_method	ENUM	BARCODE, EXACT_CODE, NORMALIZED_CODE, FUZZY, MANUAL, NONE
+match_confidence	DECIMAL(3,2)	
+status	ENUM	PENDING, MATCHED, NEW_PRODUCT, MANUAL_REVIEW
+4.11 enrichment_queue
+Column	Type	Constraints
+id	UUID	PK
+product_id	UUID	FK → products
+missing_fields	JSONB	
+priority	INT	DEFAULT 0
+source_requested	ENUM	CATALOG, SCRAPING, MANUAL
+status	ENUM	PENDING, PROCESSING, DONE
+4.12 export_logs
+Column	Type	Constraints
+id	UUID	PK
+organization_id	UUID	FK → organizations
+export_type	ENUM	IMPORT, UPDATE
+filters	JSONB	{ date_from, date_to, supplier_id }
+status	ENUM	PENDING, PROCESSING, READY, DOWNLOADED
+file_path	VARCHAR(500)	
+record_count	INT	
+requested_by	UUID	FK → users
+requested_at	TIMESTAMP	DEFAULT now()
+4.13 audit_logs
+Column	Type	Constraints
+id	UUID	PK
+organization_id	UUID	FK → organizations
+table_name	VARCHAR(100)	
+record_id	UUID	
+action	ENUM	CREATE, UPDATE, DELETE, SOFT_DELETE, RESTORE, EXPORT, LOGIN, MATCH_OVERRIDE
+user_id	UUID	FK → users
+old_values	JSONB	
+new_values	JSONB	
+timestamp	TIMESTAMP	DEFAULT now()
+ip_address	VARCHAR(50)	
+4.14 parser_configs
+Column	Type	Constraints
+id	UUID	PK
+supplier_id	UUID	FK → suppliers
+name	VARCHAR(255)	
+parser_type	ENUM	HARDCODED, DYNAMIC_REGEX, AI_GENERATED
+config	JSONB	{ regex_patterns, extraction_rules }
+is_active	BOOLEAN	DEFAULT true
+4.15 scrape_configs
+Column	Type	Constraints
+id	UUID	PK
+supplier_id	UUID	FK → suppliers
+strategy	ENUM	WOOCOMMERCE_API, HTTP_JSONLD, FLARESOLVERR, GOOGLE_SEARCH, PLAYWRIGHT_VISION
+config	JSONB	{ base_url, selectors, api_key }
+5. Business Rules Engine (Hard Rules)
+5.1 Source Precedence (Enrichment)
+
+Rule ID: SRC-PREC-001 Rule: When populating a product field (e.g., description, image, barcode), the system MUST check sources in this order and stop at the first valid value:
+
+Manual Entry (if user has explicitly set a value)
+Invoice XML / Embedded Data
+Supplier Catalog (uploaded file)
+Supplier Product List (uploaded file)
+Web Scraping Exception: Cost Price always comes from the latest approved invoice, but application requires user confirmation.
+5.2 Poimenidis Code Normalization
+
+Rule ID: NORM-POI-001 Rule: For Supplier "Ποιμενίδης", during parsing, if supplier_code starts with 03-, strip the prefix. The remaining string is the manufacturer_code. Example: 03-DCD996 → DCD996. Application: Applied during Step 5 (Normalization), before Step 6 (Matching).
+
+5.3 Product Identity Independence
+
+Rule ID: PROD-ID-001 Rule: The internal product identity is defined by the tuple (organization_id, name, manufacturer, base_barcode). It does NOT include pylon_code. Consequence: Two products with different pylon_codes but same barcode are the SAME product in Ergalyon. The pylon_code is merely an export attribute.
+
+5.4 Soft Delete Behavior
+
+Rule ID: DEL-SFT-001 Rule: When a supplier is soft-deleted (deleted_at is set):
+
+It disappears from "Active Suppliers" lists.
+It cannot be selected for new invoices.
+Historical invoices linked to this supplier REMAIN visible and accessible.
+The supplier can be restored by an ADMIN or OWNER. Rule ID: DEL-SFT-002 Rule: When a product is soft-deleted:
+It disappears from active product lists.
+Historical invoice items linked to it remain visible, showing the product name at the time of deletion.
+The product_supplier_link is NOT deleted but marked as inactive.
+5.5 Cost Price Overwrite Control
+
+Rule ID: COST-OVR-001 Rule: The system NEVER automatically overwrites product_supplier_links.current_cost upon invoice parsing. Process:
+
+Invoice is parsed and items matched.
+System calculates "Suggested New Cost" for each matched product.
+Dashboard shows "Pending Cost Updates".
+User selects which updates to apply.
+Only upon explicit user action (bulk or per-item) does the cost update.
+Every update creates a row in product_cost_history.
+5.6 Matching Confidence Thresholds
+
+Rule ID: MAT-THR-001
+
+Confidence >= 0.95: Auto-match. Status = MATCHED.
+Confidence 0.70 - 0.94: Status = MANUAL_REVIEW. User must confirm.
+Confidence < 0.70: Status = NEW_PRODUCT. User decides to create new or manually link.
+5.7 Agreement RAG Scope Limitation
+
+Rule ID: RAG-AGR-001 Rule: The RAG system indexing supplier agreements is ONLY for:
+
+Semantic search ("Find the clause about returns in the Poimenidis agreement").
+Chat interface (Q&A over agreement text). It MUST NOT be used to:
+Validate invoice totals against agreement prices.
+Auto-reject invoices.
+Trigger alerts for non-compliance.
+6. Technical Architecture
+6.1 Infrastructure Layout
+
+Hetzner Dedicated Server (Public Facing):
+
+Docker Host: Ubuntu 22.04 LTS.
+Services:
+app: Next.js 14 (App Router) application.
+db: PostgreSQL 16 (Business Data + Auth).
+redis: Redis 7 (Queue for Crawl4AI, session cache).
+nginx: Reverse proxy + SSL termination.
+storage: MinIO or local mounted volume for PDF/XLSX storage.
+
+Dell Laptop (Private AI Worker):
+
+Location: Inside company network.
+OS: Ubuntu 22.04.
+Services:
+ollama: Local LLM server (Llama 3.1 8B for chat, Llama 3.1 70B for analysis).
+crawl4ai: Web scraping worker.
+worker-queue: Consumes Redis jobs from Hetzner.
+Connection: Secure tunnel (WireGuard or SSH reverse tunnel) to Hetzner. No public IP needed.
+6.2 Database Strategy
+Single Source of Truth: PostgreSQL on Hetzner.
+Migration from v1: SQLite data from Ergalyon v1 will be exported and imported into PostgreSQL during deployment.
+Backups: Daily pg_dump to Hetzner Storage Box.
+6.3 AI / LLM Integration
+
+Tier 1 — Local (Dell Laptop):
+
+Model: Llama 3.1 8B via Ollama.
+Use: Chat interface, simple text normalization, supplier name detection.
+
+Tier 2 — Local Heavy (Dell Laptop):
+
+Model: Llama 3.1 70B via Ollama.
+Use: Parser generation (JSON from invoice sample), complex table extraction.
+
+Tier 3 — Cloud (Abacus AI):
+
+Model: Claude Sonnet 3.5.
+Use: Vision analysis of scanned invoices, fallback when local models fail, agreement RAG indexing.
+Trigger: Automatic fallback if Tier 1/2 returns error or timeout (>30s).
+6.4 Communication Flow
+User uploads invoice to Hetzner app.
+app stores file, creates DB record.
+app attempts local parsing (hardcoded/dynamic).
+If parsing needs AI:
+Hetzner sends job to Redis queue (jobs:parsing).
+Dell Laptop worker picks up job, processes with Ollama.
+Worker posts result back to Hetzner API endpoint (/api/internal/ai-result).
+If scraping needed:
+Hetzner adds job to Redis queue (jobs:scraping).
+Dell Laptop runs Crawl4AI, returns structured data.
+7. UI/UX Requirements
+7.1 Core Pages
+Dashboard: Stats (Invoices this month, Pending Reviews, New Products).
+Suppliers List: Table with search, filters, soft-delete toggle.
+Supplier Detail: Tabs for "Info", "Contacts", "Agreements", "Catalogs", "Invoices", "Settings".
+New Supplier Wizard: Step-by-step (AFM → AADE fetch → Contacts → Upload Agreement).
+Invoices List: Filter by status, supplier, date. Color-coded status badges.
+Invoice Detail / Review Screen:
+Left: PDF viewer (embedded).
+Right: Extracted table with inline editing.
+Below: Matched product cards with drag-and-drop re-match.
+Action buttons: "Approve", "Mark for Review", "Export".
+Products List: Search by name, code, barcode. Filter by supplier, category.
+Product Detail: Tabs for "Info", "Specs", "Cost History", "Supplier Links", "Enrichment".
+Enrichment Queue: Kanban-style board (Pending → Processing → Done).
+Export Center: Form to configure export, preview data, download XLSX.
+Audit Logs: Filterable table of all system actions.
+7.2 Key Interactions
+Drag & Drop: Re-matching an invoice line to a different product.
+Inline Edit: Clicking a cell in the extracted table to correct it.
+Bulk Actions: Selecting multiple invoices to "Approve" or "Export".
+Real-time Updates: Using WebSockets or Server-Sent Events for invoice processing status.
+8. Security & Compliance
+8.1 Authentication
+NextAuth.js with Credentials Provider (email/password).
+bcrypt for password hashing.
+Session stored in PostgreSQL (via Prisma Adapter) or JWT (stateless).
+8.2 Authorization (RBAC)
+Middleware on API routes checks user.role against required role.
+Frontend hides buttons/links based on role.
+Example: VIEWER cannot see "Delete Supplier" button.
+8.3 Data Protection
+All file uploads scanned for malware (ClamAV container optional).
+File storage paths sanitized (safePath() function) to prevent directory traversal.
+Database queries use parameterized statements (Prisma ORM) to prevent SQL Injection.
+8.4 Audit
+Every CREATE, UPDATE, DELETE is logged in audit_logs.
+Old and new values stored as JSON for full traceability.
+9. Test Case: Poimenidis (Ποιμενίδης)
+9.1 Supplier Profile
+Name: Ποιμενίδης ΑΕ
+AFM: (To be provided by user)
+Website: (To be provided by user)
+Document Types: Invoices (PDF with text layer + XML sometimes), Offers (PDF).
+Code Particularity: Supplier Code = 03-{MANUFACTURER_CODE}. Example: 03-DCD996 means Manufacturer Code is DCD996.
+9.2 Test Invoice Sample
+
+Given: PDF Invoice from Poimenidis containing:
+
+Line	Supplier Code	Description	Qty	Unit Price
+1	03-DCD996	Γωνιακός τροχός DeWalt 125mm	2	85.00
+2	03-DCF887	Κρουστικό κατσαβίδι Milwaukee M18	1	140.00
+3	BOSCH-GBH2-28	Σκαπτικό πιστολέτο Bosch	1	220.00
+
+Expected System Behavior:
+
+Upload: User selects "Ποιμενίδης" and uploads PDF.
+Extraction: pdftotext extracts table.
+Normalization:
+Line 1: supplier_code = 03-DCD996 → normalized_supplier_code = DCD996. manufacturer_code = DCD996.
+Line 2: supplier_code = 03-DCF887 → normalized_supplier_code = DCF887. manufacturer_code = DCF887.
+Line 3: supplier_code = BOSCH-GBH2-28 → no 03- prefix, so normalized_supplier_code = BOSCH-GBH2-28. manufacturer_code = BOSCH-GBH2-28.
+Matching:
+If product_supplier_links has a record for Poimenidis with supplier_code = 03-DCD996 or manufacturer_code = DCD996, match it. Confidence = 1.0 (EXACT_CODE or NORMALIZED_CODE).
+If no link exists, status = NEW_PRODUCT.
+Product Creation (if new):
+System suggests Product Name: "Γωνιακός τροχός DeWalt 125mm".
+Suggests Manufacturer Code: DCD996.
+User reviews and clicks "Create".
+Cost Update: After approval, product_supplier_links.current_cost for this product + Poimenidis becomes 85.00 EUR.
+Export: User exports. XLSX contains row with ΚΩΔΙΚΟΣ ΚΑΤΑΣΚΕΥΑΣΤΗ = DCD996, ΤΙΜΗ ΑΓΟΡΑΣ = 85.00.
+9.3 Acceptance Criteria
+ Invoice uploaded successfully.
+ All 3 lines extracted without missing fields.
+ 03- prefix correctly stripped for lines 1 and 2.
+ Matching logic finds existing products if they exist, or flags as NEW.
+ Cost update requires explicit user confirmation.
+ Exported XLSX has correct columns in Greek.
+ No PYLONCODE is used during matching.
+10. Migration Plan (v1 → v2)
+Phase 0: Backup
+Full snapshot of Ergalyon v1 SQLite database.
+Zip of all uploaded PDFs and generated files.
+Phase 1: Schema Migration
+Run Prisma migration to create PostgreSQL schema on Hetzner.
+Map SQLite tables to new PostgreSQL tables:
+products → products + product_supplier_links
+invoices → invoices + invoice_items
+suppliers → suppliers + supplier_contacts
+Phase 2: Data Migration Script
+Python/Node script to read SQLite and write to PostgreSQL.
+Handle data transformation (splitting old flat tables into normalized tables).
+Generate initial product_supplier_links from old products table (where supplier code was embedded).
+Phase 3: Parser Migration
+Extract existing 12 hardcoded TypeScript parsers from v1.
+Convert/adapt them to v2 structure (if needed) or keep them as-is in the parsers/ directory.
+Phase 4: Cutover
+Deploy v2 to Hetzner.
+Run data migration.
+Verify with Poimenidis test case.
+Switch DNS/domain to v2.
+11. Non-Functional Requirements
+11.1 Performance
+Invoice parsing (PDF with text): < 10 seconds.
+Invoice parsing (Scanned image): < 30 seconds.
+Dashboard load: < 2 seconds.
+Export generation (1000 records): < 10 seconds.
+11.2 Scalability
+Support up to 10,000 products and 50,000 invoice items per organization.
+Support up to 5 concurrent users per organization without performance degradation.
+11.3 Reliability
+99.5% uptime for Hetzner services.
+If Dell Laptop is offline, queue jobs wait. User gets notification: "AI Worker offline. Parsing queued."
+11.4 Maintainability
+All code in TypeScript with strict typing.
+Prisma schema is the single source of truth for DB structure.
+All business rules documented in this blueprint (not just in code comments).
+12. Appendix
+12.1 Glossary
+AADE: Ανεξάρτητη Αρχή Δημοσίων Εσόδων (Greek Tax Authority).
+AFM: Αριθμός Φορολογικού Μητρώου (Tax ID).
+Enrichment: The process of adding missing data (images, specs, barcodes) to a product.
+Matching: Linking an invoice line item to an existing internal product identity.
+Normalization: Transforming supplier-specific codes into a canonical format.
+Offer: A quotation or price list from a supplier (not a fiscal invoice).
+Pylon: The ERP system used by the company.
+RAG: Retrieval-Augmented Generation (chat with documents).
+Soft Delete: Marking a record as deleted without physically removing it.
+12.2 Decision Log
+Date	Decision	Rationale
+2026-06-19	No Pylon code in matching	Pylon codes are volatile and for export only.
+2026-06-19	User-controlled cost overwrite	Prevents accidental bulk price changes.
+2026-06-19	Scraping is last resort	Manual/Catalog data is more trustworthy than web scraping.
+2026-06-19	Agreement RAG is read-only	Avoids over-engineering compliance logic.
+2026-06-19	Multi-tenant from day 1	Supports future SaaS model.
+
+END OF BLUEPRINT This document is locked. Any change requires a formal change request and approval.
