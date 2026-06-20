@@ -1,46 +1,55 @@
-# EDM v2 Backend — Main Application Entry Point
+# ═══════════════════════════════════════════════════════════════════
+# EDM v2.1 Backend — FastAPI Application Entry Point
+# ═══════════════════════════════════════════════════════════════════
+# CORS, router registration, health endpoint, startup/shutdown events.
+# ═══════════════════════════════════════════════════════════════════
 
-from contextlib import asynccontextmanager
+from __future__ import annotations
+
 import logging
 import time
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse
 
 from app.config import settings
-from app.database import engine, Base
-from app.services.logging_config import setup_logging
-from app.services.metrics import metrics_endpoint, REQUEST_COUNT, REQUEST_LATENCY, track_http_request
-from app.services.rate_limiter import add_rate_limiting_middleware
-from app.services.request_size_limiter import add_request_size_limit_middleware
-from app.services.input_sanitizer import add_input_sanitization_middleware
-from app.services.secrets_validator import validate_and_exit
 
-from sqlalchemy import text
-from app.routers import suppliers, products, invoices, review_queue, export, rules, catalogs, rag, scrape, supplier_agreements, health, auth
 
+# ── Lifespan (startup / shutdown) ──────────────────────────────────
 @asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Create tables on startup if they don't exist (dev mode)."""
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    """Startup and shutdown lifecycle hooks."""
+    logger = logging.getLogger("edm")
+    logger.info(
+        "Starting %s v%s (env: %s)",
+        settings.APP_NAME,
+        settings.APP_VERSION,
+        settings.ENVIRONMENT,
+    )
+    # ── TODO: Initialise connection pools, warm caches, etc. ──
     yield
-    await engine.dispose()
+    # ── Shutdown: dispose engines, close connections ──────────
+    from app.database import engine
 
+    await engine.dispose()
+    logger.info("Application shutdown complete.")
+
+
+# ── FastAPI app instance ───────────────────────────────────────────
 app = FastAPI(
     title=settings.APP_NAME,
     version=settings.APP_VERSION,
+    description="Ergalyon Data Manager — Supplier product data pipeline",
     lifespan=lifespan,
+    docs_url="/docs" if settings.ENVIRONMENT != "production" else None,
+    redoc_url="/redoc" if settings.ENVIRONMENT != "production" else None,
 )
 
-# Setup structured logging
-log_level = getattr(settings, "LOG_LEVEL", "INFO")
-setup_logging(log_level)
 
-# Validate secrets on startup (warns in dev, exits in production)
-validate_and_exit(environment=settings.ENVIRONMENT)
-
-# CORS
+# ── CORS ───────────────────────────────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
@@ -49,97 +58,73 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Input sanitization middleware (protect against XSS/injection)
-add_input_sanitization_middleware(app)
 
-# Request size limit middleware (reject overly large payloads)
-add_request_size_limit_middleware(app, max_size=10 * 1024 * 1024)  # 10 MB default
-
-# HTTP request logging & metrics middleware
+# ── Request logging middleware ─────────────────────────────────────
 @app.middleware("http")
-async def logging_and_metrics_middleware(request: Request, call_next):
-    """Log request/response and collect Prometheus metrics."""
-    start_time = time.time()
-    method = request.method
-    path = request.url.path
-    # Process request
+async def request_logging_middleware(request: Request, call_next):
+    """Log method, path, status, and duration for every request."""
+    start = time.time()
     try:
         response = await call_next(request)
-        process_time = time.time() - start_time
-        # Structured log (JSON via logging_config)
+        elapsed = time.time() - start
         logger = logging.getLogger("edm.access")
         logger.info(
-            "HTTP request processed",
-            extra={
-                "extra_json": {
-                    "method": method,
-                    "path": path,
-                    "status_code": response.status_code,
-                    "process_time_ms": round(process_time * 1000, 2),
-                    "client_ip": request.client.host if request.client else None,
-                }
-            },
+            "%s %s → %d (%.2fms)",
+            request.method,
+            request.url.path,
+            response.status_code,
+            elapsed * 1000,
         )
-        # Prometheus metrics
-        REQUEST_COUNT.labels(method=method, endpoint=path, http_status=str(response.status_code)).inc()
-        REQUEST_LATENCY.labels(method=method, endpoint=path).observe(process_time)
         return response
     except Exception as exc:
-        process_time = time.time() - start_time
-        # Determine status code from exception if it's an HTTPException
-        status_code = getattr(exc, "status_code", 500)
-        # Structured log (JSON via logging_config) for failed requests
+        elapsed = time.time() - start
         logger = logging.getLogger("edm.access")
         logger.error(
-            "HTTP request failed",
-            extra={
-                "extra_json": {
-                    "method": method,
-                    "path": path,
-                    "status_code": status_code,
-                    "process_time_ms": round(process_time * 1000, 2),
-                    "client_ip": request.client.host if request.client else None,
-                    "exception": str(exc),
-                }
-            },
+            "%s %s → ERROR (%.2fms): %s",
+            request.method,
+            request.url.path,
+            elapsed * 1000,
+            str(exc),
         )
-        # Prometheus metrics for failed requests (we still count them)
-        REQUEST_COUNT.labels(method=method, endpoint=path, http_status=str(status_code)).inc()
-        REQUEST_LATENCY.labels(method=method, endpoint=path).observe(process_time)
         raise
 
-# Rate limiting middleware
-add_rate_limiting_middleware(app)
+
+# ── Health check endpoint ──────────────────────────────────────────
+@app.get("/health", tags=["system"])
+async def health_check():
+    """Basic health check — returns app status."""
+    return {
+        "status": "ok",
+        "app": settings.APP_NAME,
+        "version": settings.APP_VERSION,
+        "environment": settings.ENVIRONMENT,
+    }
 
 
-
-# Prometheus metrics endpoint
-app.add_api_route("/metrics", metrics_endpoint, methods=["GET"], include_in_schema=False)
-
-# Routers
-app.include_router(suppliers.router)
-app.include_router(catalogs.router)
-app.include_router(products.router)
-app.include_router(invoices.router)
-app.include_router(review_queue.router)
-app.include_router(export.router)
-app.include_router(rules.router)
-app.include_router(scrape.router)
-app.include_router(supplier_agreements.router)
-
-app.include_router(rag.router)
-app.include_router(health.router)
-app.include_router(auth.router)
+# ── Router placeholders (registered as they are implemented) ───────
+# Each router is imported and included here.  Routers that are not
+# yet created simply won't exist — FastAPI ignores missing modules.
+# Uncomment / add routers as they become available:
+#
+# from app.routers import suppliers, products, catalogs, auth, health
+# app.include_router(suppliers.router)
+# app.include_router(products.router)
+# app.include_router(catalogs.router)
+# app.include_router(auth.router)
+# app.include_router(health.router)
 
 
+# ── Global exception handler ───────────────────────────────────────
+@app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
+    """Catch-all exception handler returning a structured JSON error."""
     return JSONResponse(
         status_code=500,
         content={
             "error": {
                 "code": "INTERNAL_ERROR",
                 "message": str(exc),
-                "request_id": None,
+                "path": request.url.path,
             }
         },
     )

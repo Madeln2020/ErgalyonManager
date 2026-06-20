@@ -1,15 +1,24 @@
-# EDM v2 Backend — Database Engine
+# ═══════════════════════════════════════════════════════════════════
+# EDM v2.1 Backend — Async SQLAlchemy Engine & Session
+# ═══════════════════════════════════════════════════════════════════
 
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from collections.abc import AsyncGenerator
+
+from sqlalchemy.ext.asyncio import (
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 from sqlalchemy.orm import DeclarativeBase
 
 from app.config import settings
 
 engine = create_async_engine(
     settings.DATABASE_URL,
-    echo=settings.DEBUG,
-    pool_size=10,
-    max_overflow=20,
+    echo=settings.DB_ECHO,
+    pool_size=settings.DB_POOL_SIZE,
+    max_overflow=settings.DB_MAX_OVERFLOW,
+    pool_pre_ping=True,  # verify connections before use
 )
 
 async_session_factory = async_sessionmaker(
@@ -20,11 +29,13 @@ async_session_factory = async_sessionmaker(
 
 
 class Base(DeclarativeBase):
+    """Base class for all ORM models."""
+
     pass
 
 
-async def get_db() -> AsyncSession:
-    """FastAPI dependency: yield an async DB session."""
+async def get_db() -> AsyncGenerator[AsyncSession, None]:
+    """FastAPI dependency: yield an async DB session with commit/rollback."""
     async with async_session_factory() as session:
         try:
             yield session
@@ -32,3 +43,5 @@ async def get_db() -> AsyncSession:
         except Exception:
             await session.rollback()
             raise
+        finally:
+            await session.close()
