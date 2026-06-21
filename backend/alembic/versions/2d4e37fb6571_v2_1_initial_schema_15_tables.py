@@ -395,7 +395,7 @@ def upgrade() -> None:
     op.create_check_constraint("chk_parsed_docs_kind", "parsed_documents", "doc_kind IN ('invoice','offer','catalog','unknown')")
     op.create_check_constraint("chk_parsed_docs_status", "parsed_documents", "parse_status IN ('pending','success','needs_review','failed')")
     # ParsedLineItems
-    op.create_check_constraint("chk_pli_source", "parsed_line_items", "extraction_source IN ('xml','pdf_ocr','pdf_table','manual')")
+    op.create_check_constraint("chk_pli_source", "parsed_line_items", "extraction_source IN ('xml','pdf_ocr','pdf_table','manual','vision','llm')")
     # MatchDecisions
     op.create_check_constraint("chk_md_decision_type", "match_decisions", "decision_type IN ('auto_exact','auto_suggested','manual_confirm','manual_override')")
     # EnrichmentEvents

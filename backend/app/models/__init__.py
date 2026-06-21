@@ -342,7 +342,7 @@ class ParsedLineItem(Base, TimestampMixin):
     extraction_source: Mapped[str] = mapped_column(
         VARCHAR(20),
         CheckConstraint(
-            "extraction_source IN ('xml','pdf_ocr','pdf_table','manual')"
+            "extraction_source IN ('xml','pdf_ocr','pdf_table','manual','vision','llm')"
         ),
         nullable=False,
     )

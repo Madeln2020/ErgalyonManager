@@ -63,7 +63,7 @@
 - `unit_price`
 - `line_total`
 - `vat_rate`
-- `extraction_source` (xml/pdf_ocr/pdf_table/manual)
+- `extraction_source` (xml/pdf_ocr/pdf_table/manual/vision/llm)
 - `extraction_notes`
 
 ### 3.2.6 Product

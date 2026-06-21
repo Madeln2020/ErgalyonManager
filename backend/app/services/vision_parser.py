@@ -1,122 +1,213 @@
+# EDM v2.1 — Vision Parser Service (supports FreeLLMAPI or Gemini)
+# Extracts product specifications from images/catalog PDFs using a vision-capable LLM.
 import json
-from typing import List, Dict, Any
-import google.generativeai as genai
 import os
 import tempfile
+from typing import Any, Dict, List
 
-# Configure API key from environment variable
-# It's HIGHLY recommended to use environment variables for sensitive data.
-# E.g., add GEMINI_API_KEY=*** to your .env file
-try:
-    genai.configure(api_key=os.environ["GEMINI_API_KEY"])
-    _USE_REAL_API = True
-except KeyError:
-    print("WARNING: GEMINI_API_KEY not found in environment variables. Vision parser will use mock data.")
-    genai.configure(api_key="DUMMY_API_KEY_FOR_MOCK")
-    _USE_REAL_API = False
+import httpx
 
-def _mock_extract_specifications() -> List[Dict[str, Any]]:
-    """Return mock specifications for testing/demo."""
-    return [
-        {
-            "name": "Αυτοκόλλητο Δοχείο 5L",
-            "supplier_code": "CAT-0001",
-            "description": "Πλαστικό δοχείο με αυτοκόλλητο κλείδι, χρώμα λευκό.",
-            "price": 12.5,
-            "currency": "EUR",
-            "image_url": "https://example.com/images/cat-0001.jpg",
-        },
-        {
-            "name": "Κάδικο Χειρός 250g",
-            "supplier_code": "CAT-0002",
-            "description": "Κάδικο υψηλής αντοχής, 250 γραμμάρια.",
-            "price": 3.8,
-            "currency": "EUR",
-            "image_url": "https://example.com/images/cat-0002.jpg",
-        },
-    ]
+from app.config import settings
+
+logger = logging.getLogger("edm.vision_parser")
+
+# Determine which vision provider to use
+_USE_FREELLM_VISION = bool(settings.FREELLM_VISION_MODEL and settings.FREELLM_API_KEY and settings.FREELLM_BASE_URL)
+_USE_GEMINI = False
+if not _USE_FREELLM_VISION:
+    try:
+        import google.generativeai as genai
+        if os.environ.get("GEMINI_API_KEY"):
+            genai.configure(api_key=os.environ["GEMINI_API_KEY"])
+            _USE_GEMINI = True
+        else:
+            logger.warning("GEMINI_API_KEY not set; vision parser will return empty results.")
+    except ImportError:
+        logger.warning("google-generativeai not installed; vision parser will return empty results.")
+
+
+def _extract_with_freellm_vision(image_bytes: bytes) -> List[Dict[str, Any]]:
+    """
+    Use FreeLLMAPI (vision-capable model) to extract specifications from image.
+    Returns list of dicts with keys: name, supplier_code, description, price, currency, image_url.
+    """
+    url = f"{settings.FREELLM_BASE_URL.rstrip('/')}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {settings.FREELLM_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    # Encode image as base64
+    import base64
+    b64_image = base64.b64encode(image_bytes).decode("utf-8")
+    # Assuming the model accepts image in the content as per OpenAI vision format
+    payload = {
+        "model": settings.FREELLM_VISION_MODEL,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "Examine this catalog or invoice image carefully. Identify products and extract the following information for each one:\\n"
+                            "- **name**: The product name.\\n"
+                            "- **supplier_code**: The product code from the supplier. Look for numeric or alphanumeric codes near the name.\\n"
+                            "- **description**: A brief description of the product.\\n"
+                            "- **price**: The unit price of the product. Should be a number.\\n"
+                            "- **currency**: The currency (e.g., EUR, USD). Prefer EUR.\\n"
+                            "- **image_url**: If there is an explicit image URL for the product, otherwise leave blank.\\n\\n"
+                            "Return the results as a JSON list of objects, where each object represents a product. "
+                            "If no products are found, return an empty list. If you see paragraphs of text, try to separate them into products. "
+                            "Ignore invoice summary information (e.g., total amount, VAT)."
+                        ),
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{b64_image}"},
+                    },
+                ],
+            }
+        ],
+        "temperature": 0.0,
+        "max_tokens": 2000,
+    }
+    try:
+        resp = httpx.post(url, headers=headers, json=payload, timeout=60.0)
+        resp.raise_for_status()
+        data = resp.json()
+        content = data.get("choices", [{}])[0].get("message", {}).get("content", "[]")
+        # Extract JSON from markdown if present
+        if content.strip().startswith("```json"):
+            content = content.strip()[7:-3].strip()
+        extracted = json.loads(content)
+        if not isinstance(extracted, list):
+            logger.warning(f"FreeLLM vision did not return a list: {extracted}")
+            return []
+        # Ensure each item has the expected fields
+        result = []
+        for item in extracted:
+            if not isinstance(item, dict):
+                continue
+            result.append(
+                {
+                    "name": item.get("name"),
+                    "supplier_code": item.get("supplier_code"),
+                    "description": item.get("description"),
+                    "price": item.get("price"),
+                    "currency": item.get("currency", "EUR"),
+                    "image_url": item.get("image_url"),
+                    "source_file": "",  # will be filled by caller
+                }
+            )
+        return result
+    except Exception as e:
+        logger.error(f"FreeLLM vision API call failed: {e}")
+        return []
+
+
+def _extract_with_gemini(image_bytes: bytes) -> List[Dict[str, Any]]:
+    """
+    Use Gemini Vision model to extract specifications from image.
+    Returns list of dicts with keys: name, supplier_code, description, price, currency, image_url.
+    """
+    try:
+        import google.generativeai as genai
+        from PIL import Image
+        import io
+
+        img = Image.open(io.BytesIO(image_bytes))
+        model = genai.GenerativeModel("gemini-pro-vision")
+        prompt = (
+            "Examine this catalog or invoice image carefully. Identify products and extract the following information for each one:\\n"
+            "- **name**: The product name.\\n"
+            "- **supplier_code**: The product code from the supplier. Look for numeric or alphanumeric codes near the name.\\n"
+            "- **description**: A brief description of the product.\\n"
+            "- **price**: The unit price of the product. Should be a number.\\n"
+            "- **currency**: The currency (e.g., EUR, USD). Prefer EUR.\\n"
+            "- **image_url**: If there is an explicit image URL for the product, otherwise leave blank.\\n\\n"
+            "Return the results as a JSON list of objects, where each object represents a product. "
+            "If no products are found, return an empty list. If you see paragraphs of text, try to separate them into products. "
+            "Ignore invoice summary information (e.g., total amount, VAT)."
+        )
+        response = model.generate_content([img, prompt])
+        text = response.text
+        if text.strip().startswith("```json"):
+            text = text.strip()[7:-3].strip()
+        extracted = json.loads(text)
+        if not isinstance(extracted, list):
+            logger.warning(f"Gemini vision did not return a list: {extracted}")
+            return []
+        result = []
+        for item in extracted:
+            if not isinstance(item, dict):
+                continue
+            result.append(
+                {
+                    "name": item.get("name"),
+                    "supplier_code": item.get("supplier_code"),
+                    "description": item.get("description"),
+                    "price": item.get("price"),
+                    "currency": item.get("currency", "EUR"),
+                    "image_url": item.get("image_url"),
+                    "source_file": "",
+                }
+            )
+        return result
+    except Exception as e:
+        logger.error(f"Gemini vision API call failed: {e}")
+        return []
+
 
 def extract_specifications_from_image(file_path: str) -> List[Dict[str, Any]]:
     """
-    Uses Google Gemini Vision model to extract product specifications from an image/PDF.
-    Returns a list of dicts: name, supplier_code, description, price, currency, image_url.
-    Falls back to mock data if API is unavailable or fails.
+    Public entry point – extracts specifications from an image file.
+    Uses FreeLLMAPI vision model if configured, else Gemini.
+    Returns list of dicts with keys: name, supplier_code, description, price, currency, image_url, source_file.
     """
-    # If we are not configured to use real API, return mock directly.
-    if not _USE_REAL_API:
-        return _mock_extract_specifications()
-
     try:
-        img_bytes = open(file_path, "rb").read()
+        with open(file_path, "rb") as f:
+            image_bytes = f.read()
     except FileNotFoundError:
-        print(f"ERROR: Image file not found at {file_path}")
-        # Fallback to mock
-        return _mock_extract_specifications()
-
-    # Create the model for vision
-    model = genai.GenerativeModel('gemini-pro-vision')
-
-    # Write bytes to a temporary file because upload_file expects a path
-    with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
-        tmp.write(img_bytes)
-        tmp_path = tmp.name
-
-    try:
-        uploaded_file = genai.upload_file(path=tmp_path, display_name="catalog_image")
-        prompt = (
-            "Examine this catalog or invoice image carefully. Identify products and extract the following information for each one:\n"
-            "- **name**: The product name.\n"
-            "- **supplier_code**: The product code from the supplier. Look for numeric or alphanumeric codes near the name.\n"
-            "- **description**: A brief description of the product.\n"
-            "- **price**: The unit price of the product. Should be a number.\n"
-            "- **currency**: The currency (e.g., EUR, USD). Prefer EUR.\n"
-            "- **image_url**: If there is an explicit image URL for the product, otherwise leave blank.\n\n"
-            "Return the results as a JSON list of objects, where each object represents a product. If no products are found, return an empty list. If you see paragraphs of text, try to separate them into products. Ignore invoice summary information (e.g., total amount, VAT).\n\n"
-            "Example format:\n"
-            "```json\n"
-            "[\n"
-            "  {\n"
-            "    \"name\": \"Product A\",\n"
-            "    \"supplier_code\": \"PRD-001\",\n"
-            "    \"description\": \"Description of product A.\",\n"
-            "    \"price\": 10.50,\n"
-            "    \"currency\": \"EUR\",\n"
-            "    \"image_url\": \"\"\n"
-            "  }\n"
-            "]\n"
-            "```"
-        )
-
-        response = model.generate_content([uploaded_file, prompt], stream=False)
-        # Attempt to parse the response as JSON
-        # Gemini often wraps JSON in markdown code blocks
-        text_response = response.text
-        if text_response.startswith('```json') and text_response.endswith('```'):
-            text_response = text_response[len('```json'):-len('```')].strip()
-        
-        extracted_specs = json.loads(text_response)
-        
-        if not isinstance(extracted_specs, list):
-            print(f"WARNING: Gemini did not return a list of JSON objects. Raw response: {response.text}")
-            return _mock_extract_specifications()
-        
-        return extracted_specs
-
+        logger.error(f"Image file not found: {file_path}")
+        return []
     except Exception as e:
-        print(f"Error calling Gemini Vision API: {e}")
-        # Fallback to mock data on any error
-        return _mock_extract_specifications()
-    finally:
-        # Clean up temp file
-        try:
-            os.unlink(tmp_path)
-        except Exception:
-            pass
+        logger.error(f"Failed to read image file {file_path}: {e}")
+        return []
 
-def parse_catalog(file_path: str) -> List[Dict[str, Any]]:
-    """Public entry point – called by the pipeline."""
-    specs = extract_specifications_from_image(file_path)
-    # Add a `source_file` field for traceability
+    if _USE_FREELLM_VISION:
+        specs = _extract_with_freellm_vision(image_bytes)
+    elif _USE_GEMINI:
+        specs = _extract_with_gemini(image_bytes)
+    else:
+        logger.warning("No vision provider configured; returning empty specs.")
+        specs = []
+
     for s in specs:
         s["source_file"] = file_path
     return specs
+
+
+def parse_catalog(file_path: str) -> List[Dict[str, Any]]:
+    """
+    Public entry point – called by the pipeline.
+    """
+    return extract_specifications_from_image(file_path)
+
+
+def extract_specifications_from_bytes(image_bytes: bytes) -> List[Dict[str, Any]]:
+    """
+    Extract specifications from image bytes.
+    Uses FreeLLMAPI vision model if configured, else Gemini.
+    """
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            tmp.write(image_bytes)
+            tmp_path = tmp.name
+        try:
+            specs = extract_specifications_from_image(tmp_path)
+        finally:
+            os.unlink(tmp_path)
+        return specs
+    except Exception as e:
+        logger.error(f"Failed to extract specifications from bytes: {e}")
+        return []
