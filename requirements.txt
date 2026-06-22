@@ -51,3 +51,5 @@ structlog>=24.1                # structured JSON logging
 # --- Utilities ---
 python-dotenv>=1.0
 tenacity>=8.3                  # retries / fallbacks
+email-validator>=2.0.0
+asyncpg>=0.29.0
