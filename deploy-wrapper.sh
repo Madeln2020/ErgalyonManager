@@ -1,140 +1,101 @@
 #!/usr/bin/env bash
-# ──────────────────────────────────────────────────────────────────────
-# EDM v2.1 — Deploy Script
-#   Runs: git pull → install deps → migrate → build frontend → restart
+set -e
+set -o pipefail
+
+# ===== EDM v2.1 Deploy Script (Plesk + Direct) =====
+# This script is designed to work from either:
+#   A) Plesk document root  — /var/www/vhosts/econsulting.services/pylon.ergalyon.com/
+#   B) EDM service path      — /var/www/vhosts/pylon.ergalyon.com/edm/
 #
-# Usage:
-#   ./scripts/deploy.sh                   Interactive (asks before restart)
-#   ./scripts/deploy.sh --auto            Non-interactive, full auto
-#   ./scripts/deploy.sh --dry-run         Show what would be done, don't execute
-#
-# Config via env vars (or edit defaults below):
-#   SERVICE_BACKEND    systemd service name for FastAPI backend
-#   SERVICE_CELERY     systemd service name for Celery worker
-#   SERVICE_FRONTEND   systemd service name for Next.js
-#   DEPLOY_BRANCH      git branch to pull (default: main)
-# ──────────────────────────────────────────────────────────────────────
-set -euo pipefail
+# It auto-detects which location it's running from and acts accordingly.
+# In mode A, it first rsyncs the pulled code to the EDM service path.
+# Then it runs deploy steps (deps, migrate, build, restart, healthcheck).
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-cd "$PROJECT_DIR"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+EDM_BASE="/var/www/vhosts/pylon.ergalyon.com/edm"
+DOCROOT="/var/www/vhosts/econsulting.services/pylon.ergalyon.com"
+LOG="$SCRIPT_DIR/deploy.log"
+BACKEND_HOST="127.0.0.1"
+BACKEND_PORT=3005
 
-# ── Config (override via env vars) ─────────────────────────────────
-SERVICE_BACKEND="${SERVICE_BACKEND:-edm-backend}"
-SERVICE_CELERY="${SERVICE_CELERY:-edm-celery}"
-SERVICE_FRONTEND="${SERVICE_FRONTEND:-edm-frontend}"
-DEPLOY_BRANCH="${DEPLOY_BRANCH:-main}"
-AUTO_MODE=false
-DRY_RUN=false
+exec > >(tee -a "$LOG") 2>&1
+echo "=== Deploy started $(date +%F_%T) ==="
+echo "Script dir: $SCRIPT_DIR"
 
-# ── Parse args ────────────────────────────────────────────────────
-for arg in "$@"; do
-  case "$arg" in
-    --auto)    AUTO_MODE=true ;;
-    --dry-run) DRY_RUN=true ;;
-    --help)
-      sed -n '2,13p' "$0"
-      exit 0
-      ;;
-  esac
-done
+# ── Determine actual EDM base ──────────────────────────────────
+if [ "$SCRIPT_DIR" = "$DOCROOT" ]; then
+    RUNNING_FROM_PLESK=true
+    echo "Mode: Plesk document root → will sync to $EDM_BASE"
+    ACTUAL_BASE="$EDM_BASE"
 
-# ── Colors ─────────────────────────────────────────────────────────
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-CYAN='\033[0;36m'
-NC='\033[0m' # No Color
+    # Rsync code from document root to EDM service path
+    echo "--- Syncing code ---"
+    rsync -a --delete \
+        --exclude=".env" --exclude="venv/" --exclude="uploads/" --exclude="backups/" \
+        --exclude="data/" --exclude="deploy.log" --exclude=".git" \
+        "$DOCROOT/" "$EDM_BASE/"
+    echo "   Sync done"
 
-info()    { echo -e "${CYAN}[INFO]${NC}  $1"; }
-success() { echo -e "${GREEN}[OK]${NC}    $1"; }
-warn()    { echo -e "${YELLOW}[WARN]${NC}  $1"; }
-error()   { echo -e "${RED}[ERROR]${NC} $1"; }
-
-# ── Helper ─────────────────────────────────────────────────────────
-run_step() {
-  local label="$1"
-  shift
-  info "$label"
-  if [ "$DRY_RUN" = true ]; then
-    echo "         → would run: $*"
-    return 0
-  fi
-  if [ "$AUTO_MODE" = false ]; then
-    echo -n "         → Proceed? [Y/n] "
-    read -r REPLY
-    if [[ "$REPLY" =~ ^[Nn] ]]; then
-      warn "Skipped: $label"
-      return 0
-    fi
-  fi
-  if "$@"; then
-    success "$label"
-  else
-    error "$label FAILED"
-    return 1
-  fi
-}
-
-restart_service() {
-  local svc="$1"
-  if systemctl is-active --quiet "$svc" 2>/dev/null; then
-    info "Restarting $svc..."
-    if [ "$DRY_RUN" = true ]; then
-      echo "         → would run: sudo systemctl restart $svc"
-    else
-      sudo systemctl restart "$svc" && success "Restarted $svc" || warn "Failed to restart $svc"
-    fi
-  elif supervisorctl status "$svc" 2>/dev/null; then
-    info "Restarting $svc (supervisor)..."
-    if [ "$DRY_RUN" = true ]; then
-      echo "         → would run: supervisorctl restart $svc"
-    else
-      supervisorctl restart "$svc" && success "Restarted $svc" || warn "Failed to restart $svc"
-    fi
-  else
-    warn "Service $svc not found (systemd or supervisor). Check SERVICE_* env vars."
-    warn "You may need to restart it manually via Plesk."
-  fi
-}
-
-# ═══════════════════════════════════════════════════════════════════
-echo -e "${CYAN}══════════════════════════════════════════════════${NC}"
-echo -e "${CYAN}  EDM v2.1 — Deploy Script${NC}"
-echo -e "${CYAN}  Branch: ${DEPLOY_BRANCH}  |  Dir: ${PROJECT_DIR}${NC}"
-echo -e "${CYAN}══════════════════════════════════════════════════${NC}"
-
-# ── Step 1: Git pull ─────────────────────────────────────────────
-run_step "1/5 — Pulling latest code from ${DEPLOY_BRANCH}" \
-  git pull origin "$DEPLOY_BRANCH"
-
-# ── Step 2: Install backend deps ─────────────────────────────────
-run_step "2/5 — Installing Python dependencies" \
-  bash -c "cd backend && pip install -r requirements.txt -q"
-
-# ── Step 3: Run Alembic migrations ───────────────────────────────
-run_step "3/5 — Running database migrations" \
-  bash -c "cd backend && alembic upgrade head"
-
-# ── Step 4: Install frontend deps + build ────────────────────────
-run_step "4/5 — Building frontend" \
-  bash -c "cd frontend && npm install && npm run build"
-
-# ── Step 5: Restart services ─────────────────────────────────────
-info "5/5 — Restarting services..."
-if [ "$DRY_RUN" = true ]; then
-  echo "         → would restart: ${SERVICE_BACKEND}, ${SERVICE_CELERY}, ${SERVICE_FRONTEND}"
+    # Also sync .env if missing in EDM path
+    [ -f "$DOCROOT/.env" ] && [ ! -f "$EDM_BASE/.env" ] && cp "$DOCROOT/.env" "$EDM_BASE/.env"
 else
-  restart_service "$SERVICE_BACKEND"
-  restart_service "$SERVICE_CELERY"
-  restart_service "$SERVICE_FRONTEND"
+    RUNNING_FROM_PLESK=false
+    echo "Mode: EDM service path (direct)"
+    ACTUAL_BASE="$SCRIPT_DIR"
 fi
 
-# ── Done ──────────────────────────────────────────────────────────
-echo -e "${GREEN}══════════════════════════════════════════════════${NC}"
-echo -e "${GREEN}  ✅ Deploy complete!${NC}"
-echo -e "${GREEN}  Branch: ${DEPLOY_BRANCH}${NC}"
-echo -e "${GREEN}  SHA:    $(git rev-parse --short HEAD)${NC}"
-echo -e "${GREEN}  Date:   $(date '+%Y-%m-%d %H:%M:%S')${NC}"
-echo -e "${GREEN}══════════════════════════════════════════════════${NC}"
+cd "$ACTUAL_BASE"
+
+# 1. Git pull (in case EDM path has its own git repo, or Plesk version)
+echo "--- Git pull ---"
+GIT_DIR="$ACTUAL_BASE/.git"
+if [ -d "$GIT_DIR" ]; then
+    git pull origin main 2>/dev/null || true
+else
+    echo "   No .git directory at $ACTUAL_BASE, skipping pull"
+fi
+
+# 2. Backend — install deps + migrate
+echo "--- Backend update ---"
+export PATH="$ACTUAL_BASE/venv/bin:$PATH"
+DB_URL=$(grep "^DATABASE_URL" "$ACTUAL_BASE/.env" | cut -d= -f2-)
+cd "$ACTUAL_BASE/backend"
+"$ACTUAL_BASE/venv/bin/pip" install -r "$ACTUAL_BASE/requirements.txt" -q
+echo "   Running migrations..."
+DATABASE_URL="$DB_URL" "$ACTUAL_BASE/venv/bin/alembic" upgrade head
+echo "   Backend OK"
+
+# 3. Frontend — install + build
+echo "--- Frontend build ---"
+export PATH="/opt/plesk/node/23/bin:$PATH"
+cd "$ACTUAL_BASE/frontend"
+npm install --no-fund --no-progress
+npm run build
+echo "   Frontend OK"
+
+# 4. Restart all services
+echo "--- Restarting services ---"
+for svc in edm-backend edm-celery edm-frontend; do
+    if systemctl list-units --type=service --all 2>/dev/null | grep -q "$svc"; then
+        systemctl restart "$svc" && echo "   $svc restarted" || echo "   WARNING: $svc restart failed"
+    else
+        echo "   WARNING: $svc not found, skipping"
+    fi
+done
+
+# 5. Health check
+echo "--- Health check ---"
+sleep 3
+BACKEND_OK=false
+for i in 1 2 3; do
+    if curl -sf "http://$BACKEND_HOST:$BACKEND_PORT/health" > /dev/null 2>&1; then
+        echo "   Backend health check OK (attempt $i)"
+        BACKEND_OK=true
+        break
+    fi
+    echo "   Backend not ready yet... (attempt $i)"
+    sleep 2
+done
+[ "$BACKEND_OK" = false ] && echo "   WARNING: Backend health check FAILED"
+
+echo "=== Deploy finished $(date +%F_%T) ==="
