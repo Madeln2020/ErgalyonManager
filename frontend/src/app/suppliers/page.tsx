@@ -1,499 +1,357 @@
 // frontend/src/app/suppliers/page.tsx
 'use client'
 
-import { useEffect, useState, useCallback } from 'react'
-import * as Dialog from '@radix-ui/react-dialog'
-import DashboardLayout from '../DashboardLayout'
+import { useEffect, useState } from 'react'
 import { apiFetch } from '@/lib/api'
 import { useAuth } from '@/lib/auth'
 
-// ── Types ──
 interface Supplier {
   id: string
   name: string
   vat_number: string | null
-  country: string
-  contact_email: string | null
-  contact_phone: string | null
-  parsing_profile: string | null
-  rules_json: Record<string, any>
+  default_currency: string
+  rules_json: any
   is_active: boolean
   created_at: string
-  updated_at: string
 }
 
-interface SupplierForm {
-  name: string
-  vat_number: string
-  contact_email: string
-  contact_phone: string
-  parsing_profile: string
-  rules_json: string
+interface CodeNormalizationRule {
+  op: string
+  prefix?: string
+  suffix?: string
+  pattern?: string
+  replacement?: string
 }
 
-const emptyForm: SupplierForm = {
-  name: '',
-  vat_number: '',
-  contact_email: '',
-  contact_phone: '',
-  parsing_profile: 'auto',
-  rules_json: '{}',
-}
-
-const RULE_PRESETS: Record<string, string> = {
-  'Ποιμενίδης (03- prefix)': JSON.stringify({
-    code_normalization: [
-      { operations: [{ op: 'strip_prefix', prefix: '03-' }, { op: 'trim' }], description: 'Poimenidis: 03-12345 → 12345' },
-    ],
-    validation: [{ field: 'normalized_supplier_code', rules: [{ required: true }, { regex: '^[0-9]+$' }] }],
-    enrichment_hint: { manufacturer_code_source: 'scraping', scrape_url_template: 'https://www.poimenidis.gr/search?q={supplier_code}' },
-  }, null, 2),
-  'Κενό (no rules)': '{}',
-  'Γενικός (uppercase + trim)': JSON.stringify({
-    code_normalization: [
-      { operations: [{ op: 'uppercase' }, { op: 'trim' }], description: 'Uppercase + trim' },
-    ],
-  }, null, 2),
+interface ValidationRule {
+  type: string
+  min_length?: number
+  max_length?: number
+  required?: boolean
 }
 
 export default function SuppliersPage() {
+  const { token } = useAuth()
   const [suppliers, setSuppliers] = useState<Supplier[]>([])
   const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-  const [dialogOpen, setDialogOpen] = useState(false)
-  const [editingId, setEditingId] = useState<string | null>(null)
-  const [form, setForm] = useState<SupplierForm>(emptyForm)
+  const [editingSupplier, setEditingSupplier] = useState<Supplier | null>(null)
   const [saving, setSaving] = useState(false)
-  const [deletingId, setDeletingId] = useState<string | null>(null)
-  const [toast, setToast] = useState<{ type: 'success' | 'error'; message: string } | null>(null)
-  const [testDialogOpen, setTestDialogOpen] = useState(false)
-  const [testInput, setTestInput] = useState('')
-  const [testResult, setTestResult] = useState<{ normalized_code: string; confidence: number; rules_applied: any[]; validation_errors: string[] } | null>(null)
-  const [testLoading, setTestLoading] = useState(false)
 
-  const { token, user } = useAuth()
+  // Form state for rules editing
+  const [codeRules, setCodeRules] = useState<CodeNormalizationRule[]>([])
+  const [validationRules, setValidationRules] = useState<ValidationRule[]>([])
 
-  const showToast = useCallback((type: 'success' | 'error', message: string) => {
-    setToast({ type, message })
-    setTimeout(() => setToast(null), 4000)
-  }, [])
+  useEffect(() => {
+    if (!token) return
+    setLoading(true)
 
-  const fetchSuppliers = useCallback(async () => {
-    if (!token) return // Do nothing if no token
-    try {
-      setLoading(true)
-      const data = await apiFetch<Supplier[]>('/suppliers', { // Added RBAC check
-        headers: {
-          'Authorization': `Bearer ${token}`,
-        }
+    apiFetch('/api/v1/suppliers')
+      .then((data: any) => {
+        setSuppliers(Array.isArray(data) ? (data as Supplier[]) : [])
+        setLoading(false)
       })
-      setSuppliers(Array.isArray(data) ? data : [])
-    } catch (err: any) {
-      setError(err.message)
-    } finally {
-      setLoading(false)
-    }
-  }, [token]) // Dependency on token
-
-  useEffect(() => { fetchSuppliers() }, [fetchSuppliers])
-
-  const openAdd = () => {
-    setEditingId(null)
-    setForm(emptyForm)
-    setDialogOpen(true)
-  }
-
-  const openEdit = (s: Supplier) => {
-    setEditingId(s.id)
-    setForm({
-      name: s.name,
-      vat_number: s.vat_number || '',
-      contact_email: s.contact_email || '',
-      contact_phone: s.contact_phone || '',
-      parsing_profile: s.parsing_profile || 'auto',
-      rules_json: JSON.stringify(s.rules_json || {}, null, 2),
-    })
-    setDialogOpen(true)
-  }
-
-  const applyPreset = (key: string) => {
-    const val = RULE_PRESETS[key]
-    if (val) setForm(f => ({ ...f, rules_json: val }))
-  }
-
-  const handleTestRules = async () => {
-    let parsedRules: Record<string, any> = {}
-    try {
-      parsedRules = JSON.parse(form.rules_json)
-    } catch {
-      showToast('error', 'Το rules_json δεν είναι έγκυρο JSON')
-      return
-    }
-    if (!testInput.trim()) {
-      showToast('error', 'Βάλε ένα δείγμα κωδικού προϊόντος')
-      return
-    }
-    setTestLoading(true)
-    setTestResult(null)
-    try {
-      const res = await fetch('/api/v1/rules/test', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          rules_json: parsedRules,
-          sample_code: testInput.trim(),
-          sample_description: 'Δείγμα προϊόντος για δοκιμή',
-        }),
+      .catch((err: any) => {
+        console.error('Failed to fetch suppliers:', err)
+        setLoading(false)
       })
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      const data = await res.json()
-      setTestResult(data)
-    } catch (err: any) {
-      showToast('error', 'Σφάλμα δοκιμής: ' + err.message)
-    } finally {
-      setTestLoading(false)
-    }
+  }, [token])
+
+  const handleEdit = (supplier: Supplier) => {
+    setEditingSupplier(supplier)
+    const rules = supplier.rules_json || {}
+    setCodeRules(rules.code_normalization || [])
+    setValidationRules(rules.validation || [])
   }
 
   const handleSave = async () => {
-    // Basic validation
-    if (!form.name.trim()) {
-      showToast('error', 'Το όνομα προμηθευτή είναι υποχρεωτικό')
-      return
-    }
-    let parsedRules: Record<string, any> = {}
-    try {
-      parsedRules = JSON.parse(form.rules_json)
-    } catch {
-      showToast('error', 'Το rules_json δεν είναι έγκυρο JSON')
-      return
-    }
+    if (!editingSupplier) return
 
     setSaving(true)
     try {
-      const body = {
-        name: form.name.trim(),
-        vat_number: form.vat_number.trim() || null,
-        contact_email: form.contact_email.trim() || null,
-        contact_phone: form.contact_phone.trim() || null,
-        parsing_profile: form.parsing_profile || 'auto',
-        rules_json: parsedRules,
+      const updatedRules = {
+        code_normalization: codeRules,
+        validation: validationRules,
       }
 
-      let res: Response
-      if (editingId) {
-        res = await apiFetch<Supplier>(`/suppliers/${editingId}`, { // Use RBAC aware API call
-          method: 'PUT',
-          body: JSON.stringify(body),
-        })
-      } else {
-        res = await apiFetch<Supplier>('/suppliers', { // Use RBAC aware API call
-          method: 'POST',
-          body: JSON.stringify(body),
-        })
-      }
+      await apiFetch(`/api/v1/suppliers/${editingSupplier.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rules_json: updatedRules }),
+      })
 
-      if (!res) throw new Error('Invalid response from server') // Handle API fetch error
-
-      showToast('success', editingId ? 'Ο προμηθευτής ενημερώθηκε' : 'Ο προμηθευτής δημιουργήθηκε')
-      setDialogOpen(false)
-      await fetchSuppliers()
+      // Refresh suppliers list
+      const data = await apiFetch('/api/v1/suppliers')
+      setSuppliers(Array.isArray(data) ? (data as Supplier[]) : [])
+      setEditingSupplier(null)
+      alert('Supplier rules saved successfully!')
     } catch (err: any) {
-      showToast('error', err.message)
+      console.error('Failed to save supplier rules:', err)
+      alert('Failed to save rules: ' + err.message)
     } finally {
       setSaving(false)
     }
   }
 
-  const handleDelete = async (id: string) => {
-    if (!confirm('Είσαι σίγουρος ότι θέλεις να απενεργοποιήσεις αυτόν τον προμηθευτή;')) return
-    setDeletingId(id)
-    try {
-      const res = await apiFetch<void>(`/suppliers/${id}`, { method: 'DELETE' })
-      showToast('success', 'Ο προμηθευτής απενεργοποιήθηκε')
-      await fetchSuppliers()
-    } catch (err: any) {
-      showToast('error', err.message)
-    } finally {
-      setDeletingId(null)
-    }
+  const addCodeRule = () => {
+    setCodeRules([...codeRules, { op: 'strip_prefix' }])
   }
 
-  // ── Render ──
+  const updateCodeRule = (index: number, field: string, value: any) => {
+    const updated = [...codeRules]
+    updated[index] = { ...updated[index], [field]: value }
+    setCodeRules(updated)
+  }
+
+  const removeCodeRule = (index: number) => {
+    setCodeRules(codeRules.filter((_: any, i: number) => i !== index))
+  }
+
+  const addValidationRule = () => {
+    setValidationRules([...validationRules, { type: 'required' }])
+  }
+
+  const updateValidationRule = (index: number, field: string, value: any) => {
+    const updated = [...validationRules]
+    updated[index] = { ...updated[index], [field]: value }
+    setValidationRules(updated)
+  }
+
+  const removeValidationRule = (index: number) => {
+    setValidationRules(validationRules.filter((_: any, i: number) => i !== index))
+  }
+
   return (
-    <DashboardLayout>
-      {/* Toast */}
-      {toast && (
-        <div className={`fixed top-4 right-4 z-50 px-4 py-3 rounded-lg shadow-lg text-sm font-medium transition-all ${toast.type === 'success' ? 'bg-green-600 text-white' : 'bg-red-600 text-white'}`}>
-          {toast.message}
-        </div>
-      )}
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+      <h1 className="text-3xl font-bold text-gray-900 mb-8">Suppliers</h1>
 
-      <div className="flex items-center justify-between mb-6">
-        <h2 className="text-2xl font-bold text-gray-800">Προμηθευτές</h2>
-        <button onClick={openAdd} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors">
-          + Νέος Προμηθευτής
-        </button>
-      </div>
+      {loading ? (
+        <div className="text-center text-gray-500">Loading...</div>
+      ) : (
+        <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
+          <div className="px-6 py-4 border-b border-gray-200">
+            <h2 className="text-lg font-semibold text-gray-800">Supplier List</h2>
+          </div>
 
-      {/* Error state */}
-      {error && (
-        <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg mb-4 text-sm">
-          Σφάλμα φόρτωσης: {error}
-          <button onClick={fetchSuppliers} className="ml-3 underline">Δοκίμασε ξανά</button>
-        </div>
-      )}
-
-      {/* Table */}
-      <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-gray-100 bg-gray-50">
-              <th className="text-left px-4 py-3 font-medium text-gray-600">Όνομα</th>
-              <th className="text-left px-4 py-3 font-medium text-gray-600">ΑΦΜ</th>
-              <th className="text-left px-4 py-3 font-medium text-gray-600">Email</th>
-              <th className="text-left px-4 py-3 font-medium text-gray-600">Προφίλ</th>
-              <th className="text-left px-4 py-3 font-medium text-gray-600">Κανόνες</th>
-              <th className="text-left px-4 py-3 font-medium text-gray-600">Κατάσταση</th>
-              <th className="text-right px-4 py-3 font-medium text-gray-600">Ενέργειες</th>
-            </tr>
-          </thead>
-          <tbody>
-            {loading ? (
-              <tr><td colSpan={7} className="text-center py-8 text-gray-400">Φόρτωση...</td></tr>
-            ) : suppliers.length === 0 ? (
-              <tr><td colSpan={7} className="text-center py-8 text-gray-400">Δεν υπάρχουν προμηθευτές</td></tr>
-            ) : suppliers.map((s) => (
-              <tr key={s.id} className="border-b border-gray-50 hover:bg-gray-50 transition-colors">
-                <td className="px-4 py-3 font-medium">{s.name}</td>
-                <td className="px-4 py-3 text-gray-600 font-mono text-xs">{s.vat_number || '—'}</td>
-                <td className="px-4 py-3 text-gray-600 text-xs">{s.contact_email || '—'}</td>
-                <td className="px-4 py-3">
-                  <span className={`px-2 py-0.5 rounded text-xs font-medium ${s.parsing_profile === 'xml' ? 'bg-green-100 text-green-700' : s.parsing_profile === 'pdf' ? 'bg-purple-100 text-purple-700' : s.parsing_profile === 'excel' ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600'}`}>{s.parsing_profile || 'auto'}</span>
-                </td>
-                <td className="px-4 py-3">
-                  {s.rules_json && Object.keys(s.rules_json).length > 0 ? (
-                    <span className="text-xs text-gray-500">{Object.keys(s.rules_json).join(', ')}</span>
-                  ) : (
-                    <span className="text-xs text-gray-400">—</span>
-                  )}
-                </td>
-                <td className="px-4 py-3">
-                  <span className={`inline-flex items-center gap-1 text-xs font-medium ${s.is_active ? 'text-green-600' : 'text-red-500'}`}>
-                    <span className={`w-2 h-2 rounded-full ${s.is_active ? 'bg-green-500' : 'bg-red-400'}`} />
-                    {s.is_active ? 'Ενεργός' : 'Ανενεργός'}
-                  </span>
-                </td>
-                <td className="px-4 py-3 text-right">
-                  <button onClick={() => openEdit(s)} className="text-blue-600 hover:text-blue-800 text-xs font-medium mr-3">
-                    Επεξεργασία
-                  </button>
-                  {s.is_active && (
-                    <button
-                      onClick={() => handleDelete(s.id)}
-                      disabled={deletingId === s.id}
-                      className="text-red-500 hover:text-red-700 text-xs font-medium disabled:opacity-50"
-                    >
-                      {deletingId === s.id ? '...' : 'Απενεργοποίηση'}
-                    </button>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      {/* Add / Edit Dialog */}
-      <Dialog.Root open={dialogOpen} onOpenChange={setDialogOpen}>
-        <Dialog.Portal>
-          <Dialog.Overlay className="fixed inset-0 bg-black/50 z-40" />
-          <Dialog.Content className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-white rounded-xl shadow-xl p-6 w-full max-w-2xl z-50 max-h-[85vh] overflow-y-auto">
-            <Dialog.Title className="text-lg font-bold text-gray-800 mb-1">
-              {editingId ? 'Επεξεργασία Προμηθευτή' : 'Νέος Προμηθευτής'}
-            </Dialog.Title>
-            <Dialog.Description className="text-sm text-gray-500 mb-5">
-              {editingId ? 'Ενημέρωσε τα στοιχεία του προμηθευτή' : 'Συμπλήρωσε τα στοιχεία του νέου προμηθευτή'}
-            </Dialog.Description>
-
-            <div className="space-y-4">
-              {/* Row: Name + VAT */}
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-medium text-gray-700 mb-1">Όνομα *</label>
-                  <input
-                    type="text" value={form.name}
-                    onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
-                    className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                    placeholder="e.g. Ποιμενίδης Α.Ε."
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-gray-700 mb-1">ΑΦΜ</label>
-                  <input
-                    type="text" value={form.vat_number}
-                    onChange={e => setForm(f => ({ ...f, vat_number: e.target.value }))}
-                    className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                    placeholder="e.g. 094012345"
-                  />
-                </div>
-              </div>
-
-              {/* Row: Email + Phone */}
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-medium text-gray-700 mb-1">Email</label>
-                  <input
-                    type="email" value={form.contact_email}
-                    onChange={e => setForm(f => ({ ...f, contact_email: e.target.value }))}
-                    className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-gray-700 mb-1">Τηλέφωνο</label>
-                  <input
-                    type="text" value={form.contact_phone}
-                    onChange={e => setForm(f => ({ ...f, contact_phone: e.target.value }))}
-                    className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                  />
-                </div>
-              </div>
-
-              {/* Parsing profile */}
-              <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1">Προφίλ Parsing</label>
-                <select
-                  value={form.parsing_profile}
-                  onChange={e => setForm(f => ({ ...f, parsing_profile: e.target.value }))}
-                  className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                >
-                  <option value="auto">Auto-detect</option>
-                  <option value="xml">XML (myDATA)</option>
-                  <option value="pdf">PDF</option>
-                  <option value="excel">Excel/CSV</option>
-                </select>
-              </div>
-
-              {/* Rules JSON */}
-              <div>
-                <div className="flex items-center justify-between mb-1">
-                  <label className="block text-xs font-medium text-gray-700 mb-1">Κανόνες (rules_json)</label>
-                  <div className="flex gap-1">
-                    {Object.keys(RULE_PRESETS).map(key => (
-                      <button
-                        key={key}
-                        type="button"
-                        onClick={() => applyPreset(key)}
-                        className="px-2 py-0.5 bg-gray-100 hover:bg-gray-200 text-xs text-gray-600 rounded transition-colors"
+          <div className="overflow-x-auto">
+            <table className="min-w-full divide-y divide-gray-200">
+              <thead className="bg-gray-50">
+                <tr>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Name
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    VAT
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Currency
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Status
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Actions
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="bg-white divide-y divide-gray-200">
+                {suppliers.map((supplier: Supplier) => (
+                  <tr key={supplier.id} className="hover:bg-gray-50">
+                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                      {supplier.name}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                      {supplier.vat_number || 'N/A'}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                      {supplier.default_currency}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <span
+                        className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
+                          supplier.is_active
+                            ? 'bg-green-100 text-green-800'
+                            : 'bg-red-100 text-red-800'
+                        }`}
                       >
-                        {key}
+                        {supplier.is_active ? 'Active' : 'Inactive'}
+                      </span>
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                      <button
+                        onClick={() => handleEdit(supplier)}
+                        className="text-blue-600 hover:text-blue-900 font-medium"
+                      >
+                        Edit Rules
                       </button>
-                    ))}
-                  </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Rules Modal */}
+      {editingSupplier && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full max-h-screen overflow-y-auto">
+            <div className="px-6 py-4 border-b border-gray-200 flex justify-between items-center">
+              <h3 className="text-lg font-semibold text-gray-900">
+                Edit Rules: {editingSupplier.name}
+              </h3>
+              <button
+                onClick={() => setEditingSupplier(null)}
+                className="text-gray-400 hover:text-gray-500"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="p-6 space-y-6">
+              {/* Code Normalization Rules */}
+              <div>
+                <h4 className="text-md font-medium text-gray-900 mb-3">
+                  Code Normalization Rules
+                </h4>
+                <div className="space-y-3">
+                  {codeRules.map((rule: CodeNormalizationRule, idx: number) => (
+                    <div
+                      key={idx}
+                      className="bg-gray-50 rounded-lg p-4 flex items-center gap-4"
+                    >
+                      <select
+                        value={rule.op}
+                        onChange={(e) => updateCodeRule(idx, 'op', e.target.value)}
+                        className="border border-gray-300 rounded-md shadow-sm py-1 px-3 text-sm"
+                      >
+                        <option value="strip_prefix">Strip Prefix</option>
+                        <option value="strip_suffix">Strip Suffix</option>
+                        <option value="replace">Replace</option>
+                        <option value="uppercase">Uppercase</option>
+                        <option value="lowercase">Lowercase</option>
+                      </select>
+
+                      {rule.op === 'strip_prefix' || rule.op === 'strip_suffix' ? (
+                        <input
+                          type="text"
+                          value={rule.prefix || ''}
+                          onChange={(e) =>
+                            updateCodeRule(idx, rule.op === 'strip_prefix' ? 'prefix' : 'suffix', e.target.value)
+                          }
+                          placeholder={rule.op === 'strip_prefix' ? 'Prefix to strip' : 'Suffix to strip'}
+                          className="border border-gray-300 rounded-md shadow-sm py-1 px-3 text-sm flex-1"
+                        />
+                      ) : rule.op === 'replace' ? (
+                        <>
+                          <input
+                            type="text"
+                            value={rule.pattern || ''}
+                            onChange={(e) => updateCodeRule(idx, 'pattern', e.target.value)}
+                            placeholder="Pattern"
+                            className="border border-gray-300 rounded-md shadow-sm py-1 px-3 text-sm flex-1"
+                          />
+                          <input
+                            type="text"
+                            value={rule.replacement || ''}
+                            onChange={(e) => updateCodeRule(idx, 'replacement', e.target.value)}
+                            placeholder="Replacement"
+                            className="border border-gray-300 rounded-md shadow-sm py-1 px-3 text-sm flex-1"
+                          />
+                        </>
+                      ) : null}
+
+                      <button
+                        onClick={() => removeCodeRule(idx)}
+                        className="text-red-600 hover:text-red-900 text-sm"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ))}
                 </div>
-                <textarea
-                  value={form.rules_json}
-                  onChange={e => setForm(f => ({ ...f, rules_json: e.target.value }))}
-                  rows={8}
-                  className="w-full px-3 py-2 border border-gray-200 rounded-lg text-xs font-mono focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                  placeholder='{"code_normalization": [...]}'
-                />
-                <div className="flex items-center justify-between mt-1">
-                  <p className="text-xs text-gray-400">JSON με κανόνες κανονικοποίησης, validation, enrichment_hint</p>
-                  <button
-                    type="button"
-                    onClick={() => { setTestDialogOpen(true); setTestInput(''); setTestResult(null); }}
-                    className="px-3 py-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-medium rounded transition-colors"
+                <button
+                  onClick={addCodeRule}
+                  className="mt-2 text-sm text-blue-600 hover:text-blue-900 font-medium"
+                >
+                  + Add Code Rule
+                </button>
+              </div>
+
+              {/* Validation Rules */}
+              <div>
+                <h4 className="text-md font-medium text-gray-900 mb-3">
+                  Validation Rules
+                </h4>\n                {
+
+ validationRules.map((rule: ValidationRule, idx: number) => (
+                  <div
+                    key={idx}
+                    className="bg-gray-50 rounded-lg p-4 flex items-center gap-4 mb-3"
                   >
-                    🧪 Δοκιμή Κανόνων
-                  </button>
-                </div>
+                    <select
+                      value={rule.type}
+                      onChange={(e) => updateValidationRule(idx, 'type', e.target.value)}
+                      className="border border-gray-300 rounded-md shadow-sm py-1 px-3 text-sm"
+                    >
+                      <option value="required">Required</option>
+                      <option value="min_length">Min Length</option>
+                      <option value="max_length">Max Length</option>
+                      <option value="pattern">Regex Pattern</option>
+                    </select>
+
+                    {rule.type === 'min_length' || rule.type === 'max_length' ? (
+                      <input
+                        type="number"
+                        value={rule.min_length || rule.max_length || ''}
+                        onChange={(e) =>
+                          updateValidationRule(
+                            idx,
+                            rule.type === 'min_length' ? 'min_length' : 'max_length',
+                            parseInt(e.target.value)
+                          )
+                        }
+                        placeholder="Length"
+                        className="border border-gray-300 rounded-md shadow-sm py-1 px-3 text-sm w-24"
+                      />
+                    ) : null}
+
+                    <button
+                      onClick={() => removeValidationRule(idx)}
+                      className="text-red-600 hover:text-red-900 text-sm"
+                    >
+                      Remove
+                    </button>
+                  </div>
+                ))}
+
+                <button
+                  onClick={addValidationRule}
+                  className="mt-2 text-sm text-blue-600 hover:text-blue-900 font-medium"
+                >
+                  + Add Validation Rule
+                </button>
               </div>
             </div>
 
-            {/* Actions */}
-            <div className="flex justify-end gap-3 mt-6 pt-4 border-t border-gray-100">
-              <Dialog.Close className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800 transition-colors">
-                Ακύρωση
-              </Dialog.Close>
+            <div className="px-6 py-4 border-t border-gray-200 flex justify-end gap-4">
+              <button
+                onClick={() => setEditingSupplier(null)}
+                className="px-4 py-2 border border-gray-300 rounded-md shadow-sm text-sm font-medium text-gray-700 hover:bg-gray-50"
+              >
+                Cancel
+              </button>
               <button
                 onClick={handleSave}
                 disabled={saving}
-                className={`px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors disabled:opacity-50 ${saving ? 'cursor-not-allowed' : ''}`}
+                className="px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300"
               >
-                {saving ? 'Αποθήκευση...' : editingId ? 'Ενημέρωση' : 'Δημιουργία'}
+                {saving ? 'Saving...' : 'Save Rules'}
               </button>
             </div>
-          </Dialog.Content>
-        </Dialog.Portal>
-      </Dialog.Root>
-
-      {/* Rule Tester Dialog */}
-      <Dialog.Root open={testDialogOpen} onOpenChange={setTestDialogOpen}>
-        <Dialog.Portal>
-          <Dialog.Overlay className="fixed inset-0 bg-black/50 z-40" />
-          <Dialog.Content className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-white rounded-xl shadow-xl p-6 w-full max-w-lg z-50">
-            <Dialog.Title className="text-lg font-bold text-gray-800 mb-1">🧪 Δοκιμή Κανόνων</Dialog.Title>
-            <Dialog.Description className="text-sm text-gray-500 mb-4">
-              Βάλε έναν κωδικό προϊόντος για να δεις πώς θα μετατραπεί από τους κανόνες
-            </Dialog.Description>
-
-            <div className="space-y-3">
-              <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1">Κωδικός προϊόντος</label>
-                <input
-                  type="text"
-                  value={testInput}
-                  onChange={e => setTestInput(e.target.value)}
-                  onKeyDown={e => { if (e.key === 'Enter') handleTestRules() }}
-                  className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  placeholder='e.g. 03-12345'
-                />
-              </div>
-
-              <button
-                onClick={handleTestRules}
-                disabled={testLoading}
-                className="w-full px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 transition-colors disabled:opacity-50"
-              >
-                {testLoading ? 'Δοκιμή...' : '🧪 Δοκιμή'}
-              </button>
-
-              {testResult && (
-                <div className="bg-gray-50 rounded-lg p-4 space-y-2 text-sm">
-                  <div className="flex items-center justify-between">
-                    <span className="text-gray-600">Κανονικοποιημένος κωδικός:</span>
-                    <span className="font-mono font-bold text-lg text-green-700">{testResult.normalized_code || '(κενό)'}</span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-gray-600">Confidence:</span>
-                    <span className="font-mono font-medium">{testResult.confidence}%</span>
-                  </div>
-                  {testResult.rules_applied.length > 0 && (
-                    <div>
-                      <p className="text-gray-600 mb-1">Κανόνες που εφαρμόστηκαν:</p>
-                      {testResult.rules_applied.filter(r => r.triggered).map((r, i) => (
-                        <div key={i} className="text-xs font-mono bg-white rounded px-2 py-1 border border-gray-100 mb-1">
-                          <span className="text-blue-600">{r.rule_type}</span>:
-                          "{r.input}" → "{r.output}"
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                  {testResult.validation_errors.length > 0 && (
-                    <div className="bg-red-50 rounded px-3 py-2">
-                      <p className="text-xs font-medium text-red-700 mb-1">Σφάλματα validation:</p>
-                      {testResult.validation_errors.map((e, i) => (
-                        <p key={i} className="text-xs text-red-600">• {e}</p>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          </Dialog.Content>
-        </Dialog.Portal>
-      </Dialog.Root>
-    </DashboardLayout>
+          </div>
+        </div>
+      )}
+    </div>
   )
 }

@@ -1,6 +1,7 @@
 # EDM v2.1 — Vision Parser Service (supports FreeLLMAPI or Gemini)
 # Extracts product specifications from images/catalog PDFs using a vision-capable LLM.
 import json
+import logging
 import os
 import tempfile
 from typing import Any, Dict, List

@@ -17,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import InboundFile, ParsedDocument, ParsedLineItem, Supplier
+from app.config import settings
 from app.services.minio_client import download_bytes
 from app.services.xml_parser import XMLParser, ParsedInvoice, ParsedInvoiceLine
 from app.services.pdf_parser import PDFParser
@@ -52,37 +53,42 @@ async def _get_supplier_parser(db: AsyncSession, supplier_id: Optional[UUID]) ->
 
 
 def _parse_xml(content: bytes) -> ParseResult:
-    """Parse XML (myDATA) content."""
+    """Parse XML (myDATA) content. Handles all invoices in the file."""
     parser = XMLParser(content)
-    invoices: list[ParsedInvoice] = parser.parse_all()
-    if not invoices:
+    all_invoices: list[ParsedInvoice] = parser.parse_all()
+    if not all_invoices:
         return ParseResult(error_message="No invoices found in XML")
 
-    invoice = invoices[0]
+    # Use the first invoice as the primary source for header info
+    primary = all_invoices[0]
     header_dict = {
-        "invoice_number": invoice.header.invoice_number,
-        "invoice_date": invoice.header.invoice_date.isoformat() if isinstance(invoice.header.invoice_date, date) else str(invoice.header.invoice_date),
-        "currency": invoice.header.currency,
-        "issuer_vat": invoice.header.issuer_vat,
-        "counterpart_vat": invoice.header.counterpart_vat,
+        "invoice_number": primary.header.invoice_number,
+        "invoice_date": primary.header.invoice_date.isoformat() if isinstance(primary.header.invoice_date, date) else str(primary.header.invoice_date),
+        "currency": primary.header.currency,
+        "issuer_vat": primary.header.issuer_vat,
+        "counterpart_vat": primary.header.counterpart_vat,
+        "invoice_count": len(all_invoices),
     }
 
+    # Combine all line items from all invoices
     lines = []
-    for line in invoice.lines:
-        lines.append({
-            "line_index": line.line_number,
-            "supplier_sku_raw": line.supplier_code,
-            "description_raw": line.description,
-            "qty": float(line.quantity) if isinstance(line.quantity, Decimal) else line.quantity,
-            "unit_price": float(line.unit_price) if isinstance(line.unit_price, Decimal) else line.unit_price,
-            "line_total": float(line.line_total) if isinstance(line.line_total, Decimal) else line.line_total,
-            "vat_amount": float(line.vat_amount) if line.vat_amount and isinstance(line.vat_amount, Decimal) else line.vat_amount,
-            "extraction_source": "xml",
-        })
+    for invoice_idx, invoice in enumerate(all_invoices):
+        for line in invoice.lines:
+            lines.append({
+                "invoice_index": invoice_idx + 1,
+                "line_index": line.line_number,
+                "supplier_sku_raw": line.supplier_code,
+                "description_raw": line.description,
+                "qty": float(line.quantity) if isinstance(line.quantity, Decimal) else line.quantity,
+                "unit_price": float(line.unit_price) if isinstance(line.unit_price, Decimal) else line.unit_price,
+                "line_total": float(line.line_total) if isinstance(line.line_total, Decimal) else line.line_total,
+                "vat_amount": float(line.vat_amount) if line.vat_amount and isinstance(line.vat_amount, Decimal) else line.vat_amount,
+                "extraction_source": "xml",
+            })
 
     return ParseResult(
         doc_kind="invoice",
-        confidence=invoice.parsing_confidence,
+        confidence=primary.parsing_confidence,
         parser_version="xml-v1.0",
         header_json=header_dict,
         lines=lines,

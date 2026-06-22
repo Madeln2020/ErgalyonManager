@@ -51,7 +51,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 app = FastAPI(
     title=settings.APP_NAME,
     version=settings.APP_VERSION,
-    description="Ergalyon Data Manager — Supplier product data pipeline",
+    description="Ergalyon Data Manager v2.1 — Supplier product data pipeline",
     lifespan=lifespan,
     docs_url="/docs" if settings.ENVIRONMENT != "production" else None,
     redoc_url="/redoc" if settings.ENVIRONMENT != "production" else None,
@@ -110,19 +110,35 @@ async def health_check():
     }
 
 
-# ── Router registration ───────────────────────────────────────────────
-# Register all routers as they are implemented
-from app.routers import suppliers, products, catalogs, auth, health, upload
+# ── Router registration ────────────────────────────────────────────
+from app.routers import (
+    auth,
+    companies,
+    suppliers,
+    products,
+    upload,
+    invoices,
+    matching,
+    review,
+    enrichment,
+    cost_management,
+    export,
+)
 
+app.include_router(auth.router)
+app.include_router(companies.router)
 app.include_router(suppliers.router)
 app.include_router(products.router)
-app.include_router(catalogs.router)
-app.include_router(auth.router)
-app.include_router(health.router)
 app.include_router(upload.router)
+app.include_router(invoices.router)
+app.include_router(matching.router)
+app.include_router(review.router)
+app.include_router(enrichment.router)
+app.include_router(cost_management.router)
+app.include_router(export.router)
 
 
-# ── Global exception handler ───────────────────────────────────────
+# ── Global exception handler ──────────────────────────────────────
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     """Catch-all exception handler returning a structured JSON error."""

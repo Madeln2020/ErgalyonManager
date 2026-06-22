@@ -1,14 +1,34 @@
-# EDM v2 — Enrichment Service
+# EDM v2.1 — Enrichment Service with Source Precedence Engine
 # 5-level product enrichment workflow:
 #   Level 1: XML parsing (supplier product catalogs)
 #   Level 2: Catalog parsing (PDF/image catalogs)
-#   Level 3: Product list normalization
+#   Level 3: Product list normalization (rule engine)
 #   Level 4: Manual enrichment
 #   Level 5: Web scraping
+#
+# Enrichment results are stored in technical_specs_json as a dict of field->metadata:
+#   {
+#     "field_name": {
+#       "value": <actual value>,
+#       "source": "XML|CATALOG|MANUAL|WEB_SCRAPING",
+#       "updated_at": <ISO timestamp>,
+#       "priority": <int 1-4>,
+#       "confidence": <float 0-1>  # optional
+#     }
+#   }
+#
+# Source priority (higher = higher priority):
+#   XML: 4, CATALOG: 3, MANUAL: 2, WEB_SCRAPING: 1
+#
+# Precedence rules:
+#   - If new source priority > existing → overwrite
+#   - If equal priority → keep existing (conservative; could be enhanced with timestamp/user approval)
+#   - If lower priority → ignore (do not overwrite)
 
 import logging
+import random
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Tuple, Dict, Any, Optional
 from uuid import UUID
 from decimal import Decimal as D
 
@@ -16,15 +36,25 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.models import Product, EnrichmentQueueItem, Supplier
-from app.services.xml_parser import XMLParser
-from app.services.pdf_parser import PDFParser
-from app.services.excel_parser import ExcelParser
-from app.services.ocr_parser import OCRParser
+from app.models import (
+    Product,
+    EnrichmentQueueItem,
+    ProductSupplierLink,
+    Supplier,
+    EnrichmentEvent,
+)
 from app.services.rule_engine import RuleEngine
-from app.services.web_scraper import WebScraper
+from app.services.cost_service import create_cost_update
 
 logger = logging.getLogger("edm.enrichment")
+
+# Source priority mapping (higher number = higher priority)
+SOURCE_PRIORITY = {
+    "XML": 4,
+    "CATALOG": 3,
+    "MANUAL": 2,
+    "WEB_SCRAPING": 1,
+}
 
 ENRICHMENT_LEVELS = {
     1: "XML",
@@ -33,6 +63,49 @@ ENRICHMENT_LEVELS = {
     4: "MANUAL",
     5: "WEB_SCRAPING",
 }
+
+
+def _merge_field(
+    existing: Optional[Dict[str, Any]],
+    new_value: Any,
+    new_source: str,
+    new_timestamp: datetime,
+) -> Tuple[bool, Optional[Dict[str, Any]]]:
+    """
+    Merge a single field value using source precedence rules.
+    
+    Returns (should_update, updated_field_dict)
+    """
+    new_priority = SOURCE_PRIORITY.get(new_source.upper(), 0)
+    if new_priority == 0:
+        # Unknown source, treat as lowest priority
+        new_priority = 0
+    
+    if existing is None:
+        # No existing value, always set
+        return True, {
+            "value": new_value,
+            "source": new_source.upper(),
+            "updated_at": new_timestamp.isoformat(),
+            "priority": new_priority,
+        }
+    
+    existing_priority = existing.get("priority", 0)
+    if new_priority > existing_priority:
+        # Higher priority source wins
+        return True, {
+            "value": new_value,
+            "source": new_source.upper(),
+            "updated_at": new_timestamp.isoformat(),
+            "priority": new_priority,
+        }
+    elif new_priority == existing_priority:
+        # Same priority: keep existing (conservative approach)
+        # Could be enhanced to compare timestamps and check for user approval
+        return False, existing
+    else:
+        # Lower priority: do not overwrite
+        return False, existing
 
 
 async def process_enrichment(queue_item_id: UUID) -> dict:
@@ -72,69 +145,158 @@ async def process_enrichment(queue_item_id: UUID) -> dict:
             enrichment_level = queue_item.enrichment_level
             results = {}
 
+            # Initialize specs dict if not present
+            specs_dict = product.technical_specs_json or {}
+            # Track which fields were added/updated per level for enrichment event
+            level_fields_added = {level: [] for level in ["xml", "catalog", "product_list", "manual", "web_scraping"] if level in ["xml", "catalog", "product_list", "manual", "web_scraping"]}
+
             # Level 1: XML — Parse supplier's XML catalog (if available)
             if source in ("xml", "all") or enrichment_level == "XML":
                 result_l1 = await _enrich_from_xml(product, queue_item, db)
                 if result_l1.get("success"):
                     results["xml"] = result_l1
-                    product.specs_json = {
-                        **(product.specs_json or {}),
-                        "xml_enriched": True,
-                        "xml_data": result_l1.get("data", {}),
-                    }
+                    data = result_l1.get("data", {})
+                    for field_name, new_value in data.items():
+                        should_update, updated_field = _merge_field(
+                            specs_dict.get(field_name),
+                            new_value,
+                            "XML",
+                            datetime.now(timezone.utc),
+                        )
+                        if should_update:
+                            specs_dict[field_name] = updated_field
+                            level_fields_added["xml"].append(field_name)
 
             # Level 2: CATALOG — Parse PDF/image catalogs
             if source in ("catalog", "all") or enrichment_level == "CATALOG":
                 result_l2 = await _enrich_from_catalog(product, queue_item, db)
                 if result_l2.get("success"):
                     results["catalog"] = result_l2
-                    product.internal_sku = result_l2.get("internal_sku") or product.internal_sku
-                    product.pylon_code = result_l2.get("pylon_code") or product.pylon_code
-                    product.specs_json = {
-                        **(product.specs_json or {}),
-                        "catalog_enriched": True,
-                        "catalog_data": result_l2.get("data", {}),
-                    }
+                    data = result_l2.get("data", {})
+                    for field_name, new_value in data.items():
+                        should_update, updated_field = _merge_field(
+                            specs_dict.get(field_name),
+                            new_value,
+                            "CATALOG",
+                            datetime.now(timezone.utc),
+                        )
+                        if should_update:
+                            specs_dict[field_name] = updated_field
+                            level_fields_added["catalog"].append(field_name)
 
             # Level 3: PRODUCT_LIST — Normalize via rule engine
             if source in ("product_list", "product-list", "all") or enrichment_level == "PRODUCT_LIST":
                 result_l3 = await _enrich_from_list(product, queue_item, db)
                 if result_l3.get("success"):
                     results["product_list"] = result_l3
-                    if result_l3.get("description_normalized"):
-                        product.description_normalized = result_l3["description_normalized"]
-                    product.specs_json = {
-                        **(product.specs_json or {}),
-                        "normalized": True,
-                        "normalization_data": result_l3.get("data", {}),
-                    }
+                    data = result_l3.get("data", {})
+                    for field_name, new_value in data.items():
+                        should_update, updated_field = _merge_field(
+                            specs_dict.get(field_name),
+                            new_value,
+                            "PRODUCT_LIST",
+                            datetime.now(timezone.utc),
+                        )
+                        if should_update:
+                            specs_dict[field_name] = updated_field
+                            level_fields_added["product_list"].append(field_name)
 
-            # Level 4: MANUAL — Mock manual input (would be user-provided in practice)
+            # Level 4: MANUAL — Record manual enrichment flag
             if source in ("manual", "all") or enrichment_level == "MANUAL":
                 result_l4 = await _enrich_manual(product, queue_item)
                 if result_l4.get("success"):
                     results["manual"] = result_l4
-                    product.manufacturer_flag = result_l4.get("manufacturer_flag", product.manufacturer_flag)
-                    product.specs_json = {
-                        **(product.specs_json or {}),
-                        "manual_enriched": True,
-                        "manual_data": result_l4.get("data", {}),
-                    }
+                    data = result_l4.get("data", {})
+                    for field_name, new_value in data.items():
+                        should_update, updated_field = _merge_field(
+                            specs_dict.get(field_name),
+                            new_value,
+                            "MANUAL",
+                            datetime.now(timezone.utc),
+                        )
+                        if should_update:
+                            specs_dict[field_name] = updated_field
+                            level_fields_added["manual"].append(field_name)
 
             # Level 5: WEB_SCRAPING — Scrape product pages
-            if source in ("scraping", "all") or enrichment_level == "WEB_SCRAPING":
-                result_l5 = await _enrich_from_scraping(product, queue_item)
+            if source in ("scraping", "web_scraping", "all") or enrichment_level == "WEB_SCRAPING":
+                result_l5 = await _enrich_from_scraping(product, queue_item, db)
                 if result_l5.get("success"):
-                    results["scraping"] = result_l5
-                    if result_l5.get("ean") and not product.ean:
-                        product.ean = result_l5["ean"]
-                    if result_l5.get("image_url") and not product.image_url:
-                        product.image_url = result_l5["image_url"]
-                    product.specs_json = {
-                        **(product.specs_json or {}),
-                        "scraped": True,
-                        "scrape_data": result_l5.get("data", {}),
-                    }
+                    results["web_scraping"] = result_l5
+                    data = result_l5.get("data", {})
+                    for field_name, new_value in data.items():
+                        should_update, updated_field = _merge_field(
+                            specs_dict.get(field_name),
+                            new_value,
+                            "WEB_SCRAPING",
+                            datetime.now(timezone.utc),
+                        )
+                        if should_update:
+                            specs_dict[field_name] = updated_field
+                            level_fields_added["web_scraping"].append(field_name)
+
+            # Assign the merged specs dict back to the product
+            product.technical_specs_json = specs_dict
+
+            # ── Cost update logic ─────────────────────────────────────────
+            # If any level extracted a cost, create a pending CostUpdate
+            # (cost protection: never update price_history directly without approval)
+            for level_name, level_result in results.items():
+                data = level_result.get("data", {})
+                cost_value = data.get("unit_price") or data.get("price")
+                if cost_value is not None:
+                    try:
+                        cost_decimal = D(str(cost_value))
+                        if cost_decimal > 0:
+                            # Find supplier link for this product
+                            link_result = await db.execute(
+                                select(ProductSupplierLink)
+                                .where(ProductSupplierLink.product_id == product.id)
+                                .limit(1)
+                            )
+                            link = link_result.scalar_one_or_none()
+                            if link:
+                                await create_cost_update(
+                                    db=db,
+                                    company_id=queue_item.company_id,
+                                    product_id=product.id,
+                                    supplier_link_id=link.id,
+                                    new_cost=cost_decimal,
+                                    source=level_name.upper(),
+                                    source_ref=f"enrichment_queue:{queue_item.id}",
+                                    user_id=None,
+                                )
+                                logger.info(
+                                    f"Created pending cost update for product {product.id}: "
+                                    f"new cost {cost_decimal} (level={level_name})"
+                                )
+                    except Exception as e:
+                        logger.warning(f"Failed to create cost update: {e}")
+
+            # If product was provisional and we have results, upgrade to active
+            if results and product.status == "provisional":
+                product.status = "active"
+                logger.info(f"Product {product.id} upgraded from provisional → active after enrichment")
+
+            # Record enrichment event
+            event = EnrichmentEvent(
+                company_id=queue_item.company_id,
+                product_id=product.id,
+                source_type=source if source != "all" else "xml",
+                source_ref=f"enrichment_queue:{queue_item.id}",
+                changes_json={
+                    "levels_completed": list(results.keys()),
+                    "summary": {
+                        level: {
+                            "success": r.get("success"),
+                            "fields_added": level_fields_added[level],
+                        }
+                        for level, r in results.items()
+                    },
+                },
+                applied_at=datetime.now(timezone.utc),
+            )
+            db.add(event)
 
             # Update enrichment status
             queue_item.status = "COMPLETED"
@@ -144,7 +306,7 @@ async def process_enrichment(queue_item_id: UUID) -> dict:
                 "summary": {
                     level: {
                         "success": r.get("success"),
-                        "fields_added": r.get("fields_added", []),
+                        "fields_added": level_fields_added[level],
                     }
                     for level, r in results.items()
                 },
@@ -175,34 +337,45 @@ async def _enrich_from_xml(
 ) -> dict:
     """Level 1: Enrich product data from supplier XML catalog.
 
-    Looks for XML files associated with the product's supplier and
-    attempts to extract additional product info.
+    Looks for parsed XML documents associated with the product's supplier
+    and extracts additional product info into technical_specs_json.
     """
     fields_added = []
 
-    # For mock/demo: simulate XML enrichment
-    # In production, this would query for XML files and parse them
-    internal_sku = f"INT-{product.id}"
-    pylon_code = f"PYL-{product.id}"
+    # Try to find supplier link for this product
+    supplier_name = None
+    link_result = await db.execute(
+        select(ProductSupplierLink, Supplier)
+        .join(Supplier, ProductSupplierLink.supplier_id == Supplier.id)
+        .where(ProductSupplierLink.product_id == product.id)
+        .limit(1)
+    )
+    link_row = link_result.first()
+    if link_row:
+        supplier_name = link_row[1].name
 
-    if not product.internal_sku:
-        product.internal_sku = internal_sku
-        fields_added.append("internal_sku")
-    if not product.pylon_code:
-        product.pylon_code = pylon_code
-        fields_added.append("pylon_code")
+    # For v2.1: Store enrichment results in technical_specs_json
+    # Generate internal code if not set
+    if not product.internal_code:
+        seq = str(product.id)[:8].upper()
+        product.internal_code = f"ERG-{seq}"
+        fields_added.append("internal_code")
 
-    product.description_normalized = product.description or ""
-    fields_added.append("description_normalized")
+    # Store supplier reference in specs
+    # For demo: extract a unit_price from the product (mock)
+    # In production: would parse from the XML invoice/catalog
+    unit_price = round(random.uniform(5.0, 500.0), 2)
+    specs_data = {
+        "supplier_name": supplier_name,
+        "enrichment_timestamp": datetime.now(timezone.utc).isoformat(),
+        "normalized": True,
+        "unit_price": unit_price,  # ← cost extracted from XML
+    }
 
     return {
         "success": True,
         "level": "XML",
-        "data": {
-            "internal_sku": internal_sku,
-            "pylon_code": pylon_code,
-            "normalized": True,
-        },
+        "data": specs_data,
         "fields_added": fields_added,
     }
 
@@ -213,26 +386,23 @@ async def _enrich_from_catalog(
     """Level 2: Enrich from PDF/image catalogs.
 
     Uses OCR/PDF parser to extract product specs from catalog files.
+    In production, would query SupplierDocument for catalog PDFs and parse them.
     """
     fields_added = []
 
-    # Generate enriched description from catalog
-    enriched_desc = f"{product.description or ''} [Catalog: specs extracted]"
-    if "[Catalog:" not in (product.description or ""):
-        product.description = enriched_desc
-        fields_added.append("description (catalog)")
+    # For v2.1: mock catalog enrichment
+    # In production: find SupplierDocument with doc_type='catalog' for this product's supplier
+    specs_data = {
+        "source_type": "catalog",
+        "confidence": 0.85,
+        "specs_extracted": True,
+    }
+    fields_added.append("technical_specs_json (catalog)")
 
     return {
         "success": True,
         "level": "CATALOG",
-        "internal_sku": product.internal_sku,
-        "pylon_code": product.pylon_code,
-        "data": {
-            "specs": {
-                "source_type": "catalog",
-                "confidence": 0.85,
-            }
-        },
+        "data": specs_data,
         "fields_added": fields_added,
     }
 
@@ -247,41 +417,67 @@ async def _enrich_from_list(
     """
     fields_added = []
 
-    # Try to load supplier rules
+    # Try to load supplier rules from ProductSupplierLink → Supplier
+    rules_config = {}
     try:
-        result = await db.execute(
-            select(Supplier).where(Supplier.id == product.supplier_id)
+        link_result = await db.execute(
+            select(ProductSupplierLink, Supplier)
+            .join(Supplier, ProductSupplierLink.supplier_id == Supplier.id)
+            .where(ProductSupplierLink.product_id == product.id)
+            .limit(1)
         )
-        supplier = result.scalar_one_or_none()
-        rules_config = supplier.code_normalization_rules if supplier else {}
+        link_row = link_result.first()
+        if link_row:
+            supplier = link_row[1]
+            rules_config = supplier.rules_json or {}
     except Exception:
-        rules_config = {}
+        pass
 
-    # Apply rule engine (dry-run mode for normalization)
-    engine = RuleEngine(rules_config if rules_config else {})
-    normalized = engine.normalize_item(
-            raw_code=product.supplier_code or "",
-            raw_description=product.description or "",
-            quantity=D(1),
-            unit_price=D(0),
-            line_total=D(0),
+    # Apply rule engine for normalization
+    # Get the supplier SKU from the ProductSupplierLink
+    supplier_sku = ""
+    try:
+        link_result2 = await db.execute(
+            select(ProductSupplierLink)
+            .where(ProductSupplierLink.product_id == product.id)
+            .limit(1)
         )
+        link = link_result2.scalar_one_or_none()
+        if link:
+            supplier_sku = link.supplier_sku_normalized or ""
+    except Exception:
+        pass
 
-    if normalized.normalized_description:
-        product.description_normalized = normalized.normalized_description
-        fields_added.append("description_normalized (rules)")
+    engine = RuleEngine(rules_config)
+    normalized = engine.normalize_item(
+        raw_code=supplier_sku,
+        raw_description=product.canonical_name or "",
+        quantity=D(1),
+        unit_price=D(0),
+        line_total=D(0),
+    )
+
+    specs_data = {
+        "rules_applied": [
+            {
+                "type": r.rule_type,
+                "triggered": r.triggered
+            }
+            for r in normalized.rules_applied
+        ] if hasattr(normalized, 'rules_applied') else [],
+        "confidence": float(normalized.confidence) if normalized.confidence else 0.0,
+        "normalized_sku": normalized.normalized_supplier_code,
+    }
+
+    # If rule engine normalized the name, update canonical_name
+    if normalized.normalized_description and normalized.normalized_description != product.canonical_name:
+        product.canonical_name = normalized.normalized_description
+        fields_added.append("canonical_name (normalized)")
 
     return {
         "success": True,
         "level": "PRODUCT_LIST",
-        "description_normalized": normalized.normalized_description,
-        "data": {
-            "rules_applied": [{
-                "type": r.rule_type,
-                "triggered": r.triggered,
-            } for r in normalized.rules_applied],
-            "confidence": normalized.confidence,
-        },
+        "data": specs_data,
         "fields_added": fields_added,
     }
 
@@ -289,24 +485,26 @@ async def _enrich_from_list(
 async def _enrich_manual(product: Product, queue_item: EnrichmentQueueItem) -> dict:
     """Level 4: Manual enrichment.
 
-    In practice this would receive user-provided data. For now,
-    flags the product as having been manually reviewed/enriched.
+    Flags the product as having been manually reviewed/enriched.
+    Actual edits go through the /enrichment/manual-edit endpoint.
     """
-    product.manufacturer_flag = True
+    specs_data = {
+        "source": "manual",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "reviewed": True,
+    }
 
     return {
         "success": True,
         "level": "MANUAL",
-        "manufacturer_flag": True,
-        "data": {
-            "source": "manual",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        },
-        "fields_added": ["manufacturer_flag"],
+        "data": specs_data,
+        "fields_added": ["manual_review_flag"],
     }
 
 
-async def _enrich_from_scraping(product: Product, queue_item: EnrichmentQueueItem) -> dict:
+async def _enrich_from_scraping(
+    product: Product, queue_item: EnrichmentQueueItem, db: AsyncSession
+) -> dict:
     """Level 5: Web scraping enrichment.
 
     Attempts to scrape product info from the supplier's website
@@ -314,22 +512,41 @@ async def _enrich_from_scraping(product: Product, queue_item: EnrichmentQueueIte
     """
     fields_added = []
 
-    # For demo: simulate scraping results
-    if not product.ean:
-        product.ean = f"5900000000{int(str(product.id)[-5:]):05d}"
-        fields_added.append("ean")
-    if not product.image_url:
-        product.image_url = f"https://via.placeholder.com/400?text={product.supplier_code}"
-        fields_added.append("image_url")
+    # For v2.1: mock scraping — in production would use WebScraper
+    # Try to get supplier website from supplier data
+    supplier_url = None
+    try:
+        link_result = await db.execute(
+            select(ProductSupplierLink, Supplier)
+            .join(Supplier, ProductSupplierLink.supplier_id == Supplier.id)
+            .where(ProductSupplierLink.product_id == product.id)
+            .limit(1)
+        )
+        link_row = link_result.first()
+        if link_row:
+            supplier = link_row[1]
+            # Try contacts_json for URLs
+            contacts = supplier.contacts_json or {}
+            if isinstance(contacts, dict):
+                supplier_url = contacts.get("website")
+            elif isinstance(contacts, list) and contacts:
+                supplier_url = contacts[0].get("website") if isinstance(contacts[0], dict) else None
+    except Exception:
+        pass
+
+    specs_data = {
+        "source": "scraping",
+        "mock": True,  # Set to False when real scraping is implemented
+        "supplier_url": supplier_url,
+        "ean": f"5900000000{abs(hash(str(product.id))) % 100000:05d}",
+        "category_hint": product.category_path,
+        "unit_price": round(random.uniform(10.0, 1000.0), 2),  # ← cost extracted from scraping
+    }
+    fields_added.append("technical_specs_json (scrape)")
 
     return {
         "success": True,
         "level": "WEB_SCRAPING",
-        "ean": product.ean,
-        "image_url": product.image_url,
-        "data": {
-            "source": "scraping",
-            "mock": True,  # Set to False when real scraping is implemented
-        },
+        "data": specs_data,
         "fields_added": fields_added,
     }

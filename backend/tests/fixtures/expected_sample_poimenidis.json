@@ -1,0 +1,87 @@
+{
+  "doc_kind": "invoice",
+  "parser_version": "1.0.0",
+  "header": {
+    "series": "1",
+    "aa": "1234",
+    "issueDate": "2026-06-15",
+    "invoiceTypeCode": "1.1",
+    "currency": "EUR",
+    "issuer_vat": "094012345",
+    "counterpart_vat": "803034270"
+  },
+  "line_items": [
+    {
+      "line_index": 0,
+      "supplier_sku_raw": "03-12345",
+      "supplier_sku_normalized": "12345",
+      "description_raw": "ΣΕΓΑ ΣΠΑΘΟΥ BOSCH 800W 26MM",
+      "qty": 2,
+      "unit_price": 42.75,
+      "line_total": 85.50,
+      "vat_rate": 24
+    },
+    {
+      "line_index": 1,
+      "supplier_sku_raw": "03-12346",
+      "supplier_sku_normalized": "12346",
+      "description_raw": "ΛΑΜΑ ΣΕΓΑΣ BOSCH 240MM (5ΤΕΜ)",
+      "qty": 5,
+      "unit_price": 6.50,
+      "line_total": 32.50,
+      "vat_rate": 24
+    },
+    {
+      "line_index": 2,
+      "supplier_sku_raw": "03-12347",
+      "supplier_sku_normalized": "12347",
+      "description_raw": "ΔΡΑΠΑΝΟ 18V MAKITA 2ΤΑΧΥΤΗΤΩΝ",
+      "qty": 1,
+      "unit_price": 142.00,
+      "line_total": 142.00,
+      "vat_rate": 24
+    },
+    {
+      "line_index": 3,
+      "supplier_sku_raw": "03-12348",
+      "supplier_sku_normalized": "12348",
+      "description_raw": "ΓΩΝΙΑΚΟΣ ΤΡΟΧΟΣ 115MM BOSCH GWS 7-115",
+      "qty": 3,
+      "unit_price": 29.97,
+      "line_total": 89.90,
+      "vat_rate": 24
+    },
+    {
+      "line_index": 4,
+      "supplier_sku_raw": "03-12349",
+      "supplier_sku_normalized": "12349",
+      "description_raw": "ΚΑΤΣΑΒΙΔΙ 12V BOSCH 2 ΤΑΧΥΤΗΤΕΣ",
+      "qty": 2,
+      "unit_price": 59.00,
+      "line_total": 118.00,
+      "vat_rate": 24
+    },
+    {
+      "line_index": 5,
+      "supplier_sku_raw": "03-12400",
+      "supplier_sku_normalized": "12400",
+      "description_raw": "ΤΡΥΠΑΝΙ ΜΕΤΑΛΛΟΥ 10MM DEWALT",
+      "qty": 10,
+      "unit_price": 4.50,
+      "line_total": 45.00,
+      "vat_rate": 24
+    },
+    {
+      "line_index": 6,
+      "supplier_sku_raw": "03-12401",
+      "supplier_sku_normalized": "12401",
+      "description_raw": "ΣΕΤ ΚΟΥΤΙ ΤΡΥΠΑΝΙΩΝ 50ΤΕΜ DEWALT",
+      "qty": 3,
+      "unit_price": 24.00,
+      "line_total": 72.00,
+      "vat_rate": 24
+    }
+  ],
+  "invoice_count": 2,
+  "notes": "Expected 2 invoices with total 7 line items (first: 5 items, second: 2 items), all with 03- prefix stripped from SKU"
+}

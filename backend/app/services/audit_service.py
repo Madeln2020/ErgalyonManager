@@ -36,6 +36,7 @@ async def log_event(
     entity_type: str,
     entity_id: UUID,
     event_name: str,
+    company_id: Optional[UUID] = None,
     user_id: Optional[UUID] = None,
     payload: Optional[Dict[str, Any]] = None,
     session: Optional[AsyncSession] = None,
@@ -44,14 +45,17 @@ async def log_event(
     # Convert UUIDs and Decimals in payload to JSON-serializable values
     safe_payload = _convert_to_json_serializable(payload) if payload else None
 
+    if company_id is None:
+        company_id = UUID("00000000-0000-0000-0000-000000000001")
+
     entry = AuditLog(
+        company_id=company_id,
         entity_type=entity_type,
         entity_id=entity_id,
-        event_name=event_name,
+        action=event_name,
+        payload_json=safe_payload or {},
         user_id=user_id,
-        payload=safe_payload or {},
         created_at=datetime.now(timezone.utc),
-        organization_id=UUID("00000000-0000-0000-0000-000000000001"),
     )
 
     own_session = session is None

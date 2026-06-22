@@ -87,6 +87,7 @@ class Company(Base, TimestampMixin):
     cost_updates = relationship("CostUpdate", back_populates="company")
     audit_logs = relationship("AuditLog", back_populates="company")
     export_jobs = relationship("ExportJob", back_populates="company")
+    enrichment_queue = relationship("EnrichmentQueueItem", back_populates="company")
 
 
 # ──────────────────────────────────────────────
@@ -409,6 +410,9 @@ class Product(Base, TimestampMixin, SoftDeleteMixin):
     cost_updates = relationship(
         "CostUpdate", back_populates="product", cascade="all, delete-orphan"
     )
+    enrichment_queue = relationship(
+        "EnrichmentQueueItem", back_populates="product", cascade="all, delete-orphan"
+    )
 
 
 # ──────────────────────────────────────────────
@@ -664,6 +668,10 @@ class CostUpdate(Base, TimestampMixin):
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
     )
     approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    rejected_by: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
+    )
+    rejected_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (
         Index("idx_cu_product", "product_id"),
@@ -772,3 +780,9 @@ class ExportJob(Base, TimestampMixin):
 
     # relationships
     company = relationship("Company", back_populates="export_jobs")
+
+
+# ──────────────────────────────────────────
+# Late import for EnrichmentQueueItem (defined in separate file)
+# ──────────────────────────────────────────
+from app.models.enrichment_queue_item import EnrichmentQueueItem  # noqa: E402, F401

@@ -1,265 +1,195 @@
-# EDM v2 — Export Router (§6.1) — Multi-tenant, Pylon ERP compatible
-
-import csv
-import io
-from datetime import date, datetime, timezone
-from typing import Optional
+# ═══════════════════════════════════════════════════════════════════
+# EDM v2.1 — Export Router (Async via Celery)
+# Creates a pending ExportJob, delegates generation to background worker.
+# ═══════════════════════════════════════════════════════════════════
+from typing import Optional, List
 from uuid import UUID
+from decimal import Decimal
+from datetime import datetime, timezone
+import os
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import StreamingResponse
-from sqlalchemy import select, func
+from fastapi.responses import FileResponse, StreamingResponse
+from pydantic import BaseModel
+from sqlalchemy import select, and_, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.models import Product, ExportLog, User, Supplier
-from app.auth import require_role, Role
+from app.models import ExportJob, Product, ProductSupplierLink, CostUpdate, User, Company, Supplier
+from app.routers.auth import get_current_user, require_role
+from app.config import settings
 
-router = APIRouter(prefix="/api/v1/export", tags=["export"])
-
-# ── Pylon ERP column mapping ──
-PYLON_HEADERS = [
-    "kwdikos_proiontos",       # ergalyon_code
-    "barcode_or_ean",          # ean
-    "perigrafi",               # description
-    "kwdikos_promithiti",      # supplier_code
-    "kwdikos_kataskevasti",    # manufacturer_code
-    "timh_cost",               # cost_price (from price_history or current_price)
-    "nomisma",                 # price_currency
-    "esoterikos_kwdikos",      # internal_sku
-    "kwdikos_pylon",           # pylon_code
-    "aade_afm_promithiti",     # supplier.afm
-    "hmeromhnia_ejagwghs",     # export timestamp
-]
+router = APIRouter(prefix="/api/v1/export", tags=["Export"])
 
 
-async def _build_product_query(
-    db: AsyncSession,
-    org_id: UUID,
-    supplier_id: Optional[UUID] = None,
-    category_k1_id: Optional[UUID] = None,
-    date_from: Optional[date] = None,
-    date_to: Optional[date] = None,
-):
-    query = (
-        select(Product)
-        .where(Product.is_deleted == False)
-        .where(Product.organization_id == org_id)
-    )
-    if supplier_id:
-        query = query.where(Product.supplier_id == supplier_id)
-    if category_k1_id:
-        query = query.where(Product.category_k1_id == category_k1_id)
-    if date_from:
-        query = query.where(func.date(Product.created_at) >= date_from)
-    if date_to:
-        query = query.where(func.date(Product.created_at) <= date_to)
-    return query
+# ──────────────────────────────────────────
+# Schemas
+# ──────────────────────────────────────────
+class ExportJobRead(BaseModel):
+    id: str
+    export_type: str
+    file_format: str
+    status: str
+    total_rows: Optional[int]
+    object_key: Optional[str]
+    error_message: Optional[str] = None
+    created_at: Optional[str]
+    completed_at: Optional[str] = None
 
 
-@router.get("")
-async def export_products(
-    format: str = Query("csv", pattern="^(csv|json|xlsx)$"),
-    supplier_id: UUID = Query(None),
-    category_k1_id: UUID = Query(None),
-    date_from: date = Query(None),
-    date_to: date = Query(None),
-    pylon_compatible: bool = Query(False, description="Export in Pylon ERP compatible format"),
+class ExportRequest(BaseModel):
+    export_type: str = "products"  # products, costs, suppliers
+    file_format: str = "xlsx"      # csv, xlsx, json, xml
+
+
+# ──────────────────────────────────────────
+# GET /jobs — List export jobs
+# ──────────────────────────────────────────
+@router.get("/jobs", response_model=List[ExportJobRead])
+async def list_export_jobs(
+    company_id: UUID = Query(..., description="Company tenant ID"),
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_role(Role.VIEWER)),
 ):
-    """Export products in CSV, JSON, or XLSX format.
-    Pylon-compatible mode uses ERP column names and AFM extraction.
-    """
-    query = await _build_product_query(
-        db, current_user.organization_id, supplier_id, category_k1_id, date_from, date_to
+    """List export jobs for a company."""
+    result = await db.execute(
+        select(ExportJob)
+        .where(ExportJob.company_id == company_id)
+        .order_by(ExportJob.created_at.desc())
+        .limit(50)
     )
-    query = query.order_by(Product.created_at.desc())
-    result = await db.execute(query)
-    products = result.scalars().all()
+    jobs = result.scalars().all()
+    return [
+        ExportJobRead(
+            id=str(j.id),
+            export_type=j.export_type,
+            file_format=j.file_format,
+            status=j.status,
+            total_rows=j.total_rows,
+            object_key=j.object_key,
+            error_message=j.error_message,
+            created_at=str(j.created_at) if j.created_at else None,
+            completed_at=str(j.completed_at) if j.completed_at else None,
+        )
+        for j in jobs
+    ]
 
-    # Pre-load supplier AFM info for Pylon format
-    supplier_afm_map = {}
-    if pylon_compatible and format in ("csv", "xlsx"):
-        suppliers = (await db.execute(
-            select(Supplier).where(Supplier.organization_id == current_user.organization_id)
-        )).scalars().all()
-        supplier_afm_map = {s.id: s.afm for s in suppliers}
 
-    # Log export
-    export_log = ExportLog(
-        organization_id=current_user.organization_id,
-        export_type="products",
-        file_format=format,
-        status="COMPLETED",
-        total_rows=len(products),
+# ──────────────────────────────────────────
+# GET /jobs/{job_id} — Get job status
+# ──────────────────────────────────────────
+@router.get("/jobs/{job_id}", response_model=ExportJobRead)
+async def get_export_job(
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Get the status/details of a specific export job."""
+    result = await db.execute(
+        select(ExportJob).where(ExportJob.id == UUID(job_id))
+    )
+    job = result.scalar_one_or_none()
+    if not job:
+        raise HTTPException(status_code=404, detail="Export job not found")
+    return ExportJobRead(
+        id=str(job.id),
+        export_type=job.export_type,
+        file_format=job.file_format,
+        status=job.status,
+        total_rows=job.total_rows,
+        object_key=job.object_key,
+        error_message=job.error_message,
+        created_at=str(job.created_at) if job.created_at else None,
+        completed_at=str(job.completed_at) if job.completed_at else None,
+    )
+
+
+# ──────────────────────────────────────────
+# GET /jobs/{job_id}/download — Download completed export file
+# ──────────────────────────────────────────
+@router.get("/jobs/{job_id}/download")
+async def download_export(
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Download a completed export file."""
+    result = await db.execute(
+        select(ExportJob).where(ExportJob.id == UUID(job_id))
+    )
+    job = result.scalar_one_or_none()
+    if not job:
+        raise HTTPException(status_code=404, detail="Export job not found")
+    if job.status != "completed":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Export job status is '{job.status}', not 'completed'. "
+                   f"Check GET /api/v1/export/jobs/{job_id} for status."
+        )
+    if not job.object_key or not os.path.isfile(job.object_key):
+        raise HTTPException(status_code=404, detail="Export file not found on disk")
+
+    media_map = {
+        "csv": "text/csv",
+        "json": "application/json",
+        "xml": "application/xml",
+        "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    }
+    media_type = media_map.get(job.file_format, "application/octet-stream")
+    filename = f"{job.export_type}_export.{job.file_format}"
+
+    return FileResponse(
+        path=job.object_key,
+        media_type=media_type,
+        filename=filename,
+    )
+
+
+# ──────────────────────────────────────────
+# POST / — Create an export job (async via Celery)
+# ──────────────────────────────────────────
+@router.post("", response_model=ExportJobRead)
+async def create_export(
+    data: ExportRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Create an export job. Generation runs in background via Celery.
+
+    Returns immediately with the job (status='pending'). Poll
+    GET /api/v1/export/jobs/{job_id} to wait for completion, then
+    GET /api/v1/export/jobs/{job_id}/download to retrieve the file.
+    """
+    # Create the ExportJob record
+    job = ExportJob(
+        company_id=current_user.company_id,
+        export_type=data.export_type,
+        file_format=data.file_format,
+        status="pending",
         requested_by=current_user.id,
     )
-    db.add(export_log)
-    await db.flush()
+    db.add(job)
+    await db.commit()
+    await db.refresh(job)
 
-    timestamp_str = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    # Launch Celery background task (fire-and-forget)
+    try:
+        from celery_worker import generate_export
+        generate_export.delay(str(job.id))
+    except Exception as exc:
+        # If Celery is unavailable, mark as failed gracefully
+        job.status = "failed"
+        job.error_message = f"Could not launch background worker: {exc}"
+        await db.commit()
+        logger = __import__("logging").getLogger("edm.export")
+        logger.warning("Failed to launch Celery export task for %s: %s", job.id, exc)
 
-    # ── CSV ──
-    if format == "csv":
-        output = io.StringIO()
-        writer = csv.writer(output)
-        if pylon_compatible:
-            writer.writerow(PYLON_HEADERS)
-            for p in products:
-                afm = supplier_afm_map.get(p.supplier_id, "")
-                writer.writerow([
-                    p.ergalyon_code, p.ean, p.description,
-                    p.supplier_code, p.manufacturer_code,
-                    float(p.current_price) if p.current_price else None,
-                    p.price_currency, p.internal_sku, p.pylon_code,
-                    afm, timestamp_str,
-                ])
-        else:
-            writer.writerow([
-                "ergalyon_code", "supplier_code", "manufacturer_code",
-                "ean", "internal_sku", "pylon_code", "description",
-                "current_price", "currency",
-            ])
-            for p in products:
-                writer.writerow([
-                    p.ergalyon_code, p.supplier_code, p.manufacturer_code,
-                    p.ean, p.internal_sku, p.pylon_code, p.description,
-                    p.current_price, p.price_currency,
-                ])
-        output.seek(0)
-        filename = f"edm_export_{timestamp_str}.csv"
-        return StreamingResponse(
-            iter([output.getvalue()]),
-            media_type="text/csv",
-            headers={"Content-Disposition": f"attachment; filename={filename}"},
-        )
-
-    # ── JSON ──
-    elif format == "json":
-        items = []
-        for p in products:
-            item = {
-                "ergalyon_code": p.ergalyon_code,
-                "supplier_code": p.supplier_code,
-                "manufacturer_code": p.manufacturer_code,
-                "ean": p.ean,
-                "internal_sku": p.internal_sku,
-                "pylon_code": p.pylon_code,
-                "description": p.description,
-                "current_price": float(p.current_price) if p.current_price else None,
-                "currency": p.price_currency,
-            }
-            if pylon_compatible:
-                item["aade_afm_promithiti"] = supplier_afm_map.get(p.supplier_id, "")
-                item["hmeromhnia_ejagwghs"] = timestamp_str
-            items.append(item)
-        return {"total": len(items), "items": items}
-
-    # ── XLSX ──
-    elif format == "xlsx":
-        from openpyxl import Workbook
-        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-        from openpyxl.utils import get_column_letter
-        from io import BytesIO
-
-        wb = Workbook()
-
-        # Sheet 1: Products
-        ws = wb.active
-        ws.title = "Products"
-
-        # Styling
-        header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
-        header_fill = PatternFill(start_color="2F5496", end_color="2F5496", fill_type="solid")
-        header_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        thin_border = Border(
-            left=Side(style="thin"), right=Side(style="thin"),
-            top=Side(style="thin"), bottom=Side(style="thin"),
-        )
-
-        if pylon_compatible:
-            # Pylon ERP format
-            ws.append(PYLON_HEADERS)
-            for p in products:
-                afm = supplier_afm_map.get(p.supplier_id, "")
-                ws.append([
-                    p.ergalyon_code, p.ean, p.description,
-                    p.supplier_code, p.manufacturer_code,
-                    float(p.current_price) if p.current_price else None,
-                    p.price_currency, p.internal_sku, p.pylon_code,
-                    afm, timestamp_str,
-                ])
-        else:
-            headers = [
-                "A/A", "ergalyon_code", "supplier_code", "manufacturer_code",
-                "ean", "internal_sku", "pylon_code", "description",
-                "current_price", "currency", "manufacturer_flag",
-                "data_completeness", "created_at",
-            ]
-            ws.append(headers)
-            for idx, p in enumerate(products, 1):
-                ws.append([
-                    idx,
-                    p.ergalyon_code, p.supplier_code, p.manufacturer_code,
-                    p.ean, p.internal_sku, p.pylon_code, p.description,
-                    float(p.current_price) if p.current_price else None,
-                    p.price_currency, "ΝΑΙ" if p.manufacturer_flag else "ΟΧΙ",
-                    p.data_completeness_score,
-                    p.created_at.isoformat() if p.created_at else "",
-                ])
-
-        # Style header row
-        for cell in ws[1]:
-            cell.font = header_font
-            cell.fill = header_fill
-            cell.alignment = header_alignment
-            cell.border = thin_border
-
-        # Style data cells
-        for row in ws.iter_rows(min_row=2, max_row=ws.max_row, max_col=ws.max_column):
-            for cell in row:
-                cell.border = thin_border
-                cell.alignment = Alignment(vertical="center")
-
-        # Auto-fit column widths
-        for col_cells in ws.columns:
-            max_len = 0
-            col_letter = get_column_letter(col_cells[0].column)
-            for cell in col_cells:
-                if cell.value:
-                    max_len = max(max_len, len(str(cell.value)))
-            ws.column_dimensions[col_letter].width = min(max_len + 3, 50)
-
-        # Freeze header row & auto-filter
-        ws.freeze_panes = "A2"
-        ws.auto_filter.ref = ws.dimensions
-
-        # Sheet 2: Export Info
-        ws2 = wb.create_sheet("Export Info")
-        info = [
-            ["Ημερομηνία Εξαγωγής", datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")],
-            ["Πλήθος Προϊόντων", len(products)],
-            ["Οργανισμός ID", str(current_user.organization_id)],
-            ["Pylon Compatible", "ΝΑΙ" if pylon_compatible else "ΟΧΙ"],
-            ["Φίλτρο Supplier", str(supplier_id) if supplier_id else "ΟΛΑ"],
-            ["Φίλτρο Κατηγορία", str(category_k1_id) if category_k1_id else "ΟΛΕΣ"],
-        ]
-        for row in info:
-            ws2.append(row)
-        ws2.column_dimensions["A"].width = 30
-        ws2.column_dimensions["B"].width = 50
-
-        # Save
-        virtual_workbook = BytesIO()
-        wb.save(virtual_workbook)
-        virtual_workbook.seek(0)
-
-        filename = f"edm_export_{timestamp_str}.xlsx"
-        return StreamingResponse(
-            virtual_workbook,
-            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={"Content-Disposition": f"attachment; filename={filename}"},
-        )
-    else:
-        raise HTTPException(status_code=400, detail=f"Format '{format}' not yet implemented")
+    await db.refresh(job)
+    return ExportJobRead(
+        id=str(job.id),
+        export_type=job.export_type,
+        file_format=job.file_format,
+        status=job.status,
+        total_rows=job.total_rows,
+        object_key=job.object_key,
+        error_message=job.error_message,
+        created_at=str(job.created_at) if job.created_at else None,
+        completed_at=str(job.completed_at) if job.completed_at else None,
+    )

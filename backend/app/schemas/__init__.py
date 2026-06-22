@@ -454,6 +454,8 @@ class CostUpdateRead(BaseModel):
     status: str
     approved_by: Optional[UUID]
     approved_at: Optional[datetime]
+    rejected_by: Optional[UUID]
+    rejected_at: Optional[datetime]
     created_at: datetime
     updated_at: datetime
 

@@ -1,103 +1,103 @@
-# EDM v2 — Invoices Router (§6.1) — Multi-tenant
+# ═══════════════════════════════════════════════════════════════════
+# EDM v2.1 — Invoices Router (Parsed documents view, status)
+# ═══════════════════════════════════════════════════════════════════
+from typing import Optional
 
-import io
-from uuid import UUID
-
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from app.database import get_db
-from app.models import Invoice, InvoiceItem, User
-from app.schemas import InvoiceItemRead, InvoiceRead
-from app.auth import get_current_user, require_role, Role
-from app.services.pipeline import process_invoice_file
+from app.models import ParsedDocument, ParsedLineItem
+from app.routers.auth import get_current_user
 
-router = APIRouter(prefix="/api/v1/invoices", tags=["invoices"])
+router = APIRouter(prefix="/api/v1/invoices", tags=["Invoices"])
 
 
-@router.post("/upload", status_code=202)
-async def upload_invoice(
-    supplier_id: UUID = Form(...),
-    document_type: str = Form("invoice"),
-    files: list[UploadFile] = File(...),
+class ParsedDocRead(BaseModel):
+    id: str
+    doc_kind: str
+    parse_status: str
+    confidence_score: Optional[float]
+    created_at: Optional[str]
+
+
+class ParsedLineItemRead(BaseModel):
+    id: str
+    line_index: int
+    supplier_sku_raw: Optional[str]
+    supplier_sku_normalized: Optional[str]
+    description_raw: Optional[str]
+    qty: Optional[float]
+    unit_price: Optional[float]
+    line_total: Optional[float]
+    vat_rate: Optional[float]
+    extraction_source: str
+
+
+@router.get("", response_model=list[ParsedDocRead])
+async def list_parsed_documents(
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user=Depends(get_current_user),
+    parse_status: Optional[str] = None,
 ):
-    """Upload one or more invoice/offer files. Auto-processes them."""
-    invoices = []
-    for f in files:
-        ext = f.filename.split(".")[-1].lower() if f.filename else "unknown"
-        fmt = "pdf"
-        if ext in ("xml",):
-            fmt = "xml"
-        elif ext in ("jpg", "jpeg", "png", "webp"):
-            fmt = "image"
-        elif ext in ("xlsx", "xls", "csv"):
-            fmt = "excel"
-
-        content = await f.read()
-
-        invoice = Invoice(
-            supplier_id=supplier_id,
-            organization_id=current_user.organization_id,
-            document_type=document_type,
-            file_path=f"uploads/{f.filename}",
-            file_format=fmt,
-            status="uploaded",
-            created_by=current_user.id,
-        )
-        db.add(invoice)
-        await db.flush()
-        await db.refresh(invoice)
-
-        try:
-            await process_invoice_file(invoice, content, db)
-        except Exception as e:
-            invoice.status = "failed"
-            invoice.error_message = str(e)
-            await db.flush()
-
-        invoices.append(invoice)
-
-    return {
-        "invoices": [InvoiceRead.model_validate(i).model_dump() for i in invoices],
-        "job_id": f"job_{supplier_id}",
-    }
+    """List all parsed documents for the company."""
+    query = select(ParsedDocument)
+    if parse_status:
+        query = query.where(ParsedDocument.parse_status == parse_status)
+    result = await db.execute(query)
+    docs = result.scalars().all()
+    return [ParsedDocRead(
+        id=str(d.id), doc_kind=d.doc_kind, parse_status=d.parse_status,
+        confidence_score=float(d.confidence_score) if d.confidence_score else None,
+        created_at=str(d.created_at) if d.created_at else None
+    ) for d in docs]
 
 
-@router.get("/{invoice_id}", response_model=InvoiceRead)
-async def get_invoice(
-    invoice_id: UUID,
+@router.get("/{doc_id}", response_model=ParsedDocRead)
+async def get_parsed_document(
+    doc_id: str,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user=Depends(get_current_user),
 ):
+    """Get a specific parsed document."""
+    from uuid import UUID
     result = await db.execute(
-        select(Invoice).where(
-            Invoice.id == invoice_id,
-            Invoice.organization_id == current_user.organization_id,
-        )
+        select(ParsedDocument).where(ParsedDocument.id == UUID(doc_id))
     )
-    invoice = result.scalar_one_or_none()
-    if not invoice:
-        raise HTTPException(status_code=404, detail="Invoice not found")
-    return invoice
+    doc = result.scalar_one_or_none()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return ParsedDocRead(
+        id=str(doc.id), doc_kind=doc.doc_kind, parse_status=doc.parse_status,
+        confidence_score=float(doc.confidence_score) if doc.confidence_score else None,
+        created_at=str(doc.created_at) if doc.created_at else None
+    )
 
 
-@router.get("/{invoice_id}/items", response_model=list[InvoiceItemRead])
-async def get_invoice_items(
-    invoice_id: UUID,
+@router.get("/{doc_id}/items", response_model=list[ParsedLineItemRead])
+async def get_parsed_line_items(
+    doc_id: str,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user=Depends(get_current_user),
 ):
+    """Get all line items for a parsed document."""
+    from uuid import UUID
     result = await db.execute(
-        select(InvoiceItem)
-        .join(Invoice, InvoiceItem.invoice_id == Invoice.id)
-        .where(
-            InvoiceItem.invoice_id == invoice_id,
-            Invoice.organization_id == current_user.organization_id,
-        )
-        .order_by(InvoiceItem.line_number)
+        select(ParsedLineItem)
+        .where(ParsedLineItem.parsed_document_id == UUID(doc_id))
+        .order_by(ParsedLineItem.line_index)
     )
-    return result.scalars().all()
+    items = result.scalars().all()
+    return [ParsedLineItemRead(
+        id=str(i.id), line_index=i.line_index,
+        supplier_sku_raw=i.supplier_sku_raw,
+        supplier_sku_normalized=i.supplier_sku_normalized,
+        description_raw=i.description_raw,
+        qty=float(i.qty) if i.qty else None,
+        unit_price=float(i.unit_price) if i.unit_price else None,
+        line_total=float(i.line_total) if i.line_total else None,
+        vat_rate=float(i.vat_rate) if i.vat_rate else None,
+        extraction_source=i.extraction_source,
+    ) for i in items]

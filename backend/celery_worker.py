@@ -217,5 +217,264 @@ async def enrich_product_task(product_id: str, context: str):
         return {"status": "ok", "product_id": product_id}
 
 
+# ════════════════════════════════════════════════════════════════════
+# Task: generate_export
+# ════════════════════════════════════════════════════════════════════
+@celery_app.task(name="generate_export", bind=True, max_retries=2, default_retry_delay=30)
+def generate_export(self, export_job_id: str):
+    """Background task: generate an export file asynchronously.
+
+    Creates the export file, saves to EXPORT_OUTPUT_DIR, updates the
+    ExportJob record with status, total_rows, object_key, and completed_at.
+    """
+    import io
+    import csv
+    import json
+    import os
+    from datetime import datetime, timezone
+
+    from app.models import (
+        ExportJob, Product, CostUpdate, ProductSupplierLink,
+        User, Supplier,
+    )
+    from app.config import settings
+
+    logger.info("generate_export started for export_job_id=%s", export_job_id)
+
+    with SyncSessionLocal() as db:
+        try:
+            # 1. Retrieve ExportJob
+            job = db.query(ExportJob).filter(ExportJob.id == UUID(export_job_id)).first()
+            if job is None:
+                logger.error("ExportJob %s not found", export_job_id)
+                return {"status": "error", "error": "ExportJob not found"}
+
+            # 2. Update status to processing
+            job.status = "processing"
+            db.commit()
+
+            # 3. Build export data
+            headers = []
+            rows = []
+            total_rows = 0
+            filename = "export"
+
+            if job.export_type == "products":
+                items = db.query(Product).filter(Product.is_deleted == False).limit(10000).all()
+                headers = ["id", "canonical_name", "internal_code", "category_path", "status"]
+                rows = [
+                    [str(p.id), p.canonical_name, p.internal_code, p.category_path, p.status]
+                    for p in items
+                ]
+                filename = "products_export"
+                total_rows = len(items)
+
+            elif job.export_type == "costs":
+                rows_data = (
+                    db.query(CostUpdate, Product, ProductSupplierLink, User, Supplier)
+                    .join(Product, CostUpdate.product_id == Product.id)
+                    .join(ProductSupplierLink, CostUpdate.product_supplier_link_id == ProductSupplierLink.id)
+                    .join(User, CostUpdate.approved_by == User.id, isouter=True)
+                    .join(Supplier, ProductSupplierLink.supplier_id == Supplier.id, isouter=True)
+                    .filter(CostUpdate.status == "approved")
+                    .order_by(CostUpdate.approved_at.desc())
+                    .limit(10000)
+                    .all()
+                )
+                headers = [
+                    "cost_update_id", "product_id", "product_name",
+                    "supplier_id", "supplier_name", "old_cost", "new_cost",
+                    "source", "source_ref", "approved_by", "approved_at", "created_at",
+                ]
+                rows = []
+                for cu, product, link, user, supplier in rows_data:
+                    rows.append([
+                        str(cu.id),
+                        str(product.id),
+                        product.canonical_name,
+                        str(link.supplier_id) if link.supplier_id else "",
+                        supplier.name if supplier else "",
+                        float(cu.old_cost) if cu.old_cost else None,
+                        float(cu.new_cost) if cu.new_cost else None,
+                        cu.source,
+                        cu.source_ref or "",
+                        str(user.id) if user else "",
+                        cu.approved_at.isoformat() if cu.approved_at else "",
+                        cu.created_at.isoformat() if cu.created_at else "",
+                    ])
+                filename = "costs_export"
+                total_rows = len(rows_data)
+
+            elif job.export_type == "suppliers":
+                items = db.query(Supplier).filter(Supplier.is_deleted == False).limit(10000).all()
+                headers = ["id", "name", "vat_number", "default_currency", "is_active"]
+                rows = [
+                    [str(s.id), s.name, s.vat_number or "", s.default_currency, s.is_active]
+                    for s in items
+                ]
+                filename = "suppliers_export"
+                total_rows = len(items)
+
+            else:
+                job.status = "failed"
+                job.error_message = f"Unsupported export type: {job.export_type}"
+                db.commit()
+                return {"status": "failed", "error": job.error_message}
+
+            # 4. Generate file
+            content_bytes = None
+            content_str = None
+            ext = job.file_format
+
+            if ext == "csv":
+                output = io.StringIO()
+                writer = csv.writer(output)
+                writer.writerow(headers)
+                writer.writerows(rows)
+                content_str = output.getvalue()
+                content_bytes = content_str.encode("utf-8-sig")
+
+            elif ext == "json":
+                data_dicts = []
+                if job.export_type == "products":
+                    for p in db.query(Product).filter(Product.is_deleted == False).limit(10000).all():
+                        data_dicts.append({
+                            "id": str(p.id), "canonical_name": p.canonical_name,
+                            "internal_code": p.internal_code, "category_path": p.category_path,
+                            "status": p.status,
+                        })
+                elif job.export_type == "costs":
+                    for cu, product, link, user, supplier in rows_data:
+                        data_dicts.append({
+                            "cost_update_id": str(cu.id), "product_id": str(product.id),
+                            "product_name": product.canonical_name,
+                            "supplier_id": str(link.supplier_id) if link.supplier_id else None,
+                            "supplier_name": supplier.name if supplier else None,
+                            "old_cost": float(cu.old_cost) if cu.old_cost else None,
+                            "new_cost": float(cu.new_cost) if cu.new_cost else None,
+                            "source": cu.source, "source_ref": cu.source_ref,
+                            "approved_by": str(user.id) if user else None,
+                            "approved_at": cu.approved_at.isoformat() if cu.approved_at else None,
+                            "created_at": cu.created_at.isoformat() if cu.created_at else None,
+                        })
+                elif job.export_type == "suppliers":
+                    for s in db.query(Supplier).filter(Supplier.is_deleted == False).limit(10000).all():
+                        data_dicts.append({
+                            "id": str(s.id), "name": s.name, "vat_number": s.vat_number,
+                            "default_currency": s.default_currency, "is_active": s.is_active,
+                        })
+                content_str = json.dumps(data_dicts, indent=2, default=str)
+                content_bytes = content_str.encode("utf-8")
+
+            elif ext == "xml":
+                xml_lines = ['<?xml version="1.0" encoding="UTF-8"?>', f'<{job.export_type}>']
+                if job.export_type == "products":
+                    for p in db.query(Product).filter(Product.is_deleted == False).limit(10000).all():
+                        xml_lines.append(f"  <product>")
+                        xml_lines.append(f"    <id>{p.id}</id>")
+                        xml_lines.append(f"    <canonical_name>{p.canonical_name}</canonical_name>")
+                        xml_lines.append(f"    <internal_code>{p.internal_code}</internal_code>")
+                        xml_lines.append(f"    <category_path>{p.category_path or ''}</category_path>")
+                        xml_lines.append(f"    <status>{p.status}</status>")
+                        xml_lines.append(f"  </product>")
+                elif job.export_type == "costs":
+                    for cu, product, link, user, supplier in rows_data:
+                        xml_lines.append(f"  <cost_update>")
+                        xml_lines.append(f"    <id>{cu.id}</id>")
+                        xml_lines.append(f"    <product_id>{product.id}</product_id>")
+                        xml_lines.append(f"    <product_name>{product.canonical_name}</product_name>")
+                        xml_lines.append(f"    <supplier_id>{link.supplier_id if link.supplier_id else ''}</supplier_id>")
+                        xml_lines.append(f"    <supplier_name>{supplier.name if supplier else ''}</supplier_name>")
+                        xml_lines.append(f"    <old_cost>{cu.old_cost if cu.old_cost else ''}</old_cost>")
+                        xml_lines.append(f"    <new_cost>{cu.new_cost if cu.new_cost else ''}</new_cost>")
+                        xml_lines.append(f"    <source>{cu.source}</source>")
+                        xml_lines.append(f"    <source_ref>{cu.source_ref or ''}</source_ref>")
+                        xml_lines.append(f"    <approved_by>{user.id if user else ''}</approved_by>")
+                        xml_lines.append(f"    <approved_at>{cu.approved_at.isoformat() if cu.approved_at else ''}</approved_at>")
+                        xml_lines.append(f"    <created_at>{cu.created_at.isoformat() if cu.created_at else ''}</created_at>")
+                        xml_lines.append(f"  </cost_update>")
+                elif job.export_type == "suppliers":
+                    for s in db.query(Supplier).filter(Supplier.is_deleted == False).limit(10000).all():
+                        xml_lines.append(f"  <supplier>")
+                        xml_lines.append(f"    <id>{s.id}</id>")
+                        xml_lines.append(f"    <name>{s.name}</name>")
+                        xml_lines.append(f"    <vat_number>{s.vat_number or ''}</vat_number>")
+                        xml_lines.append(f"    <default_currency>{s.default_currency}</default_currency>")
+                        xml_lines.append(f"    <is_active>{s.is_active}</is_active>")
+                        xml_lines.append(f"  </supplier>")
+                xml_lines.append(f"</{job.export_type}>")
+                content_str = "\n".join(xml_lines)
+                content_bytes = content_str.encode("utf-8")
+
+            elif ext == "xlsx":
+                try:
+                    import openpyxl
+                except ImportError:
+                    job.status = "failed"
+                    job.error_message = "XLSX export not available (openpyxl not installed)"
+                    db.commit()
+                    return {"status": "failed", "error": job.error_message}
+
+                wb = openpyxl.Workbook()
+                ws = wb.active
+                ws.title = job.export_type.capitalize()
+                ws.append(headers)
+                for row in rows:
+                    ws.append(row)
+                output = io.BytesIO()
+                wb.save(output)
+                content_bytes = output.getvalue()
+
+            else:
+                job.status = "failed"
+                job.error_message = f"Unsupported file format: {ext}"
+                db.commit()
+                return {"status": "failed", "error": job.error_message}
+
+            # 5. Save to export output directory
+            export_dir = getattr(settings, "EXPORT_OUTPUT_DIR", "/tmp/edm_exports")
+            os.makedirs(export_dir, exist_ok=True)
+            file_ext = ext if ext != "xlsx" else "xlsx"
+            file_path = os.path.join(export_dir, f"{export_job_id}.{file_ext}")
+
+            mode = "wb" if ext == "xlsx" or content_bytes else "w"
+            if ext == "xlsx":
+                with open(file_path, "wb") as f:
+                    f.write(content_bytes)
+            else:
+                with open(file_path, "w", encoding="utf-8") as f:
+                    f.write(content_str or "")
+
+            # 6. Update job record
+            job.status = "completed"
+            job.object_key = file_path
+            job.total_rows = total_rows
+            job.completed_at = datetime.now(timezone.utc)
+            db.commit()
+
+            logger.info(
+                "generate_export completed for %s: type=%s format=%s rows=%d file=%s",
+                export_job_id, job.export_type, ext, total_rows, file_path,
+            )
+            return {"status": "completed", "file": file_path, "total_rows": total_rows}
+
+        except Exception as exc:
+            db.rollback()
+            logger.exception("generate_export exception for %s: %s", export_job_id, exc)
+            try:
+                job = db.query(ExportJob).filter(ExportJob.id == UUID(export_job_id)).first()
+                if job:
+                    job.status = "failed"
+                    job.error_message = str(exc)
+                    db.commit()
+            except Exception:
+                pass
+            try:
+                self.retry(exc=exc)
+            except self.MaxRetriesExceededError:
+                pass
+            return {"status": "error", "error": str(exc)}
+
+
 if __name__ == "__main__":
     celery_app.start()

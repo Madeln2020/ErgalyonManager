@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, Optional
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -41,10 +41,29 @@ class Settings(BaseSettings):
     DB_MAX_OVERFLOW: int = 20
     DB_ECHO: bool = False  # set True only for debugging SQL
 
-    # ── Redis ──────────────────────────────────────────────────────
-    REDIS_URL: str = "redis://localhost:6379/0"
-    CELERY_BROKER_URL: str = "redis://localhost:6379/1"
-    CELERY_RESULT_BACKEND: str = "redis://localhost:6379/2"
+    # ── Redis ─────────────────────────────────────────────────────
+    REDIS_HOST: str = "localhost"
+    REDIS_PORT: int = 6379
+    REDIS_PASSWORD: str = ""  # set if Redis requires auth
+    REDIS_DB: int = 0
+
+    @property
+    def REDIS_URL(self) -> str:
+        auth = f":{self.REDIS_PASSWORD}@" if self.REDIS_PASSWORD else ""
+        return f"redis://{auth}{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
+
+    CELERY_BROKER_DB: int = 1
+    CELERY_RESULT_BACKEND_DB: int = 2
+
+    @property
+    def CELERY_BROKER_URL(self) -> str:
+        auth = f":{self.REDIS_PASSWORD}@" if self.REDIS_PASSWORD else ""
+        return f"redis://{auth}{self.REDIS_HOST}:{self.REDIS_PORT}/{self.CELERY_BROKER_DB}"
+
+    @property
+    def CELERY_RESULT_BACKEND(self) -> str:
+        auth = f":{self.REDIS_PASSWORD}@" if self.REDIS_PASSWORD else ""
+        return f"redis://{auth}{self.REDIS_HOST}:{self.REDIS_PORT}/{self.CELERY_RESULT_BACKEND_DB}"
 
     # ── MinIO / S3-compatible object store ─────────────────────────
     MINIO_ENDPOINT: str = "localhost:9000"
@@ -82,7 +101,7 @@ class Settings(BaseSettings):
     # Order: XML -> Manual -> Web Scraping (last resort)
     ENRICHMENT_ORDER: list[str] = ["xml", "manual", "web_scrape"]
 
-    # ── Cost Protection (blueprint v2.1 rule) ──────────────────────
+    # ── Cost Protection (blueprint v2.1 rule) ─────────────────────
     # Existing costs are NEVER overwritten without explicit approval
     COST_PROTECTION_ENABLED: bool = True
 
@@ -91,6 +110,7 @@ class Settings(BaseSettings):
     FREELLM_BASE_URL: str = ""
     FREELLM_EMBEDDING_MODEL: str = "auto"
     FREELLM_CHAT_MODEL: str = "deepseek-ai/deepseek-v4-pro"
+    FREELLM_VISION_MODEL: str = ""  # <-- ADD THIS LINE
     FREELLM_MAX_RETRIES: int = 3
     FREELLM_TIMEOUT: int = 60
 
@@ -101,7 +121,7 @@ class Settings(BaseSettings):
     # ── Web scraping (last-resort enrichment) ──────────────────────
     CRAWL4AI_TIMEOUT: int = 30
     CRAWL4AI_USER_AGENT: str = (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "Mozilla/5.0 (Windows NT 10.0; Win64 x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/125.0.0.0 Safari/537.36"
     )
@@ -123,6 +143,14 @@ class Settings(BaseSettings):
 
     # ── Prometheus metrics ─────────────────────────────────────────
     METRICS_ENABLED: bool = True
+
+    # ── Cost approval webhook ────────────────────────────────────
+    # When a cost update is approved/rejected, POST a notification
+    COST_APPROVAL_WEBHOOK_URL: Optional[str] = None
+    COST_APPROVAL_WEBHOOK_ENABLED: bool = False
+
+    # ── Export output directory ──────────────────────────────────
+    EXPORT_OUTPUT_DIR: str = "/tmp/edm_exports"
 
     # ── model config ───────────────────────────────────────────────
     model_config = SettingsConfigDict(
