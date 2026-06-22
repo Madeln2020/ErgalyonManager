@@ -9,6 +9,11 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 
 # Alembic Config
 config = context.config
+# Allow DATABASE_URL env var to override alembic.ini
+import os
+_db_url = os.environ.get("DATABASE_URL")
+if _db_url:
+    config.set_main_option("sqlalchemy.url", _db_url)
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
